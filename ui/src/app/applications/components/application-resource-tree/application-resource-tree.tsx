@@ -1,6 +1,7 @@
 import {DropDown} from 'argo-ui';
 import * as classNames from 'classnames';
 import * as dagre from 'dagre';
+import {filter, flow, groupBy, isEqual, isNil, map, maxBy, size} from 'lodash/fp';
 import * as React from 'react';
 import Moment from 'react-moment';
 
@@ -8,6 +9,7 @@ import * as models from '../../../shared/models';
 
 import {EmptyState} from '../../../shared/components';
 import {Consumer} from '../../../shared/context';
+import * as models from '../../../shared/models';
 import {ApplicationURLs} from '../application-urls';
 import {ResourceIcon} from '../resource-icon';
 import {ResourceLabel} from '../resource-label';
@@ -95,10 +97,43 @@ function getGraphSize(nodes: dagre.Node[]): {width: number; height: number} {
 function filterGraph(app: models.Application, filteredIndicatorParent: string, graph: dagre.graphlib.Graph, predicate: (node: ResourceTreeNode) => boolean) {
     const appKey = appNodeKey(app);
     let filtered = 0;
-    graph.nodes().forEach(nodeId => {
+    const nodeArray = graph.nodes();
+    const getRs = flow(
+        filter(node => graph.node(node).kind === 'ReplicaSet'),
+        map(node => graph.node(node)),
+        map(node => ({pUid: node.parentRefs[0].uid, rev: parseInt(node.info[0].value.substr(-1), 10)})),
+        groupBy('pUid'),
+        map(maxBy('rev')),
+        map((node: {pUid: string; rev: number}) => ({...node, rev: `Rev:${node.rev}`}))
+    )(nodeArray);
+
+    const test = (node: any, array: Array<{pUid: string; rev: string}>): boolean => {
+        if (node.kind !== 'ReplicaSet') {
+            return true;
+        }
+        if (
+            isNil(node) ||
+            isNil(node.parentRefs) ||
+            isNil(node.parentRefs[0]) ||
+            isNil(node.parentRefs[0].uid) ||
+            isNil(node.info) ||
+            isNil(node.info[0]) ||
+            isNil(node.info[0].value)
+        ) {
+            return true;
+        }
+        const vals = {pUid: node.parentRefs[0].uid, rev: node.info[0].value};
+        return flow(
+            filter(isEqual(vals)),
+            size,
+            x => x !== 1
+        )(array);
+    };
+
+    nodeArray.forEach(nodeId => {
         const node: ResourceTreeNode = graph.node(nodeId) as any;
         const parentIds = graph.predecessors(nodeId);
-        if (node.root != null && !predicate(node) && appKey !== nodeId) {
+        if (node.root != null && !predicate(node) && appKey !== nodeId && test(node, getRs)) {
             const childIds = graph.successors(nodeId);
             graph.removeNode(nodeId);
             filtered++;
