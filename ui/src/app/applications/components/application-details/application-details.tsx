@@ -8,9 +8,8 @@ import {BehaviorSubject, Observable} from 'rxjs';
 import {DataLoader, EmptyState, ErrorNotification, EventsList, ObservableQuery, Page, Paginate, YamlEditor} from '../../../shared/components';
 import {AppContext} from '../../../shared/context';
 import * as appModels from '../../../shared/models';
-import {AppDetailsPreferences, AppsDetailsViewType, services} from '../../../shared/services';
-
 import {SyncStatuses} from '../../../shared/models';
+import {AppDetailsPreferences, AppsDetailsViewType, services} from '../../../shared/services';
 import {ApplicationConditions} from '../application-conditions/application-conditions';
 import {ApplicationDeploymentHistory} from '../application-deployment-history/application-deployment-history';
 import {ApplicationNodeInfo} from '../application-node-info/application-node-info';
