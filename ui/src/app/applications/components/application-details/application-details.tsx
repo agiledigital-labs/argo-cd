@@ -1,5 +1,7 @@
 import {Checkbox as ArgoCheckbox, DropDownMenu, MenuItem, NotificationType, SlidingPanel, Tab, Tabs, TopBarFilter} from 'argo-ui';
 import * as classNames from 'classnames';
+import {} from 'lodash';
+import {contains, filter as filterFP, flatMap, flow, get, isNil, map} from 'lodash/fp';
 import * as PropTypes from 'prop-types';
 import * as React from 'react';
 import {Checkbox} from 'react-form';
@@ -103,9 +105,11 @@ export class ApplicationDetails extends React.Component<RouteComponentProps<{nam
                             tree.nodes = tree.nodes || [];
                             const kindsSet = new Set<string>(tree.nodes.map(item => item.kind));
                             const treeFilter = this.getTreeFilter(pref.resourceFilter);
+
                             treeFilter.kind.forEach(kind => {
                                 kindsSet.add(kind);
                             });
+
                             const kinds = Array.from(kindsSet);
                             const noKindsFilter = pref.resourceFilter.filter(item => item.indexOf('kind:') !== 0);
                             const refreshing = application.metadata.annotations && application.metadata.annotations[appModels.AnnotationRefreshKey];
@@ -130,7 +134,13 @@ export class ApplicationDetails extends React.Component<RouteComponentProps<{nam
                                             </div>
                                         )
                                     },
-                                    ...kinds.sort().map(kind => ({value: `kind:${kind}`, label: kind}))
+                                    ...kinds.sort().map(kind => ({value: `kind:${kind}`, label: kind})),
+                                    {content: () => <span>Filters</span>},
+                                    {value: 'filters:Test', label: 'Test-Rep'},
+                                    {value: 'filters:ReplicaSets', label: 'Replica sets'},
+                                    {value: 'filters:Test1', label: 'Test-Rep1'},
+                                    {value: 'filters:Test2', label: 'Test-Rep2'},
+                                    {value: 'filters:Test3', label: 'Test-Rep3'}
                                 ],
                                 selectedValues: pref.resourceFilter,
                                 selectionChanged: items => {
@@ -212,7 +222,7 @@ export class ApplicationDetails extends React.Component<RouteComponentProps<{nam
                                             )}
                                             {((pref.view === 'tree' || pref.view === 'network') && (
                                                 <ApplicationResourceTree
-                                                    nodeFilter={node => this.filterTreeNode(node, treeFilter)}
+                                                    nodeFilter={(node: any, graph: any) => this.filterTreeNode(node, treeFilter, graph)}
                                                     selectedNodeFullName={this.selectedNodeKey}
                                                     onNodeClick={fullName => this.selectNode(fullName)}
                                                     nodeMenu={node => this.renderResourceMenu(node, application)}
@@ -469,13 +479,57 @@ export class ApplicationDetails extends React.Component<RouteComponentProps<{nam
         ];
     }
 
-    private filterTreeNode(node: ResourceTreeNode, filter: {kind: string[]; health: string[]; sync: string[]}): boolean {
-        const syncStatuses = filter.sync.map(item => (item === 'OutOfSync' ? ['OutOfSync', 'Unknown'] : [item])).reduce((first, second) => first.concat(second), []);
+    private filterReplicaSetRevisions(node: ResourceTreeNode, graph?: dagre.graphlib.Graph) {
+        const nodeArray = graph.nodes();
 
+        const replicaSetName = flow(
+            filterFP(nodeA => graph.node(nodeA).kind === 'Pod'),
+            map(nodeA => graph.node(nodeA)),
+            flatMap(get('parentRefs')),
+            filterFP(parent => parent.kind === 'ReplicaSet'),
+            map(get('name')),
+            // @ts-ignore
+            x => console.log(x) || x
+        )(nodeArray);
+
+        console.log(nodeArray);
+        const getRs: string[] = flow(
+            map(nodeA => graph.node(nodeA)),
+            filterFP(nodeA => contains(nodeA.name)(replicaSetName)),
+            map(nodeA => nodeA.uid)
+        )(nodeArray);
+
+        const test = (node: any): boolean => {
+            if (node.kind !== 'ReplicaSet') {
+                return true;
+            }
+            return contains(node.uid)(getRs);
+        };
+
+        return test(node);
+    }
+
+    private newFilter(node: ResourceTreeNode, filterList: string[], graph?: dagre.graphlib.Graph): boolean {
+        if (filterList.length === 0) {
+            return true;
+        }
+        if (isNil(graph)) {
+            return true;
+        }
+
+        const replicaSets = contains('ReplicaSets')(filterList) ? this.filterReplicaSetRevisions(node, graph) : true;
+
+        return replicaSets;
+    }
+
+    private filterTreeNode(node: ResourceTreeNode, filter: {kind: string[]; health: string[]; sync: string[]; filters: string[]}, graph?: dagre.graphlib.Graph): boolean {
+        const syncStatuses = filter.sync.map(item => (item === 'OutOfSync' ? ['OutOfSync', 'Unknown'] : [item])).reduce((first, second) => first.concat(second), []);
+        const tester = this.newFilter(node, filter.filters, graph);
         return (
             (filter.kind.length === 0 || filter.kind.indexOf(node.kind) > -1) &&
             (syncStatuses.length === 0 || node.root.hook || (node.root.status && syncStatuses.indexOf(node.root.status) > -1)) &&
-            (filter.health.length === 0 || node.root.hook || (node.root.health && filter.health.indexOf(node.root.health.status) > -1))
+            (filter.health.length === 0 || node.root.hook || (node.root.health && filter.health.indexOf(node.root.health.status) > -1)) &&
+            tester
         );
     }
 
@@ -540,10 +594,11 @@ export class ApplicationDetails extends React.Component<RouteComponentProps<{nam
         return nodeByKey;
     }
 
-    private getTreeFilter(filter: string[]): {kind: string[]; health: string[]; sync: string[]} {
+    private getTreeFilter(filter: string[]): {kind: string[]; health: string[]; sync: string[]; filters: string[]} {
         const kind = new Array<string>();
         const health = new Array<string>();
         const sync = new Array<string>();
+        const filters = new Array<string>();
         for (const item of filter) {
             const [type, val] = item.split(':');
             switch (type) {
@@ -556,9 +611,12 @@ export class ApplicationDetails extends React.Component<RouteComponentProps<{nam
                 case 'sync':
                     sync.push(val);
                     break;
+                case 'filters':
+                    filters.push(val);
+                    break;
             }
         }
-        return {kind, health, sync};
+        return {kind, health, sync, filters};
     }
 
     private showDeploy(resource: string) {

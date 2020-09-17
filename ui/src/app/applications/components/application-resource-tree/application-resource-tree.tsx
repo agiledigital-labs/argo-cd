@@ -1,12 +1,8 @@
 import {DropDown} from 'argo-ui';
 import * as classNames from 'classnames';
 import * as dagre from 'dagre';
-import {filter, flow, groupBy, isEqual, isNil, map, maxBy, size} from 'lodash/fp';
 import * as React from 'react';
 import Moment from 'react-moment';
-
-import * as models from '../../../shared/models';
-
 import {EmptyState} from '../../../shared/components';
 import {Consumer} from '../../../shared/context';
 import * as models from '../../../shared/models';
@@ -37,7 +33,7 @@ export interface ApplicationResourceTreeProps {
     app: models.Application;
     tree: models.ApplicationTree;
     useNetworkingHierarchy: boolean;
-    nodeFilter: (node: ResourceTreeNode) => boolean;
+    nodeFilter: (node: ResourceTreeNode, graph: dagre.graphlib.Graph) => boolean;
     selectedNodeFullName?: string;
     onNodeClick?: (fullName: string) => any;
     nodeMenu?: (node: models.ResourceNode) => React.ReactNode;
@@ -94,46 +90,22 @@ function getGraphSize(nodes: dagre.Node[]): {width: number; height: number} {
     return {width, height};
 }
 
-function filterGraph(app: models.Application, filteredIndicatorParent: string, graph: dagre.graphlib.Graph, predicate: (node: ResourceTreeNode) => boolean) {
+function filterGraph(
+    app: models.Application,
+    filteredIndicatorParent: string,
+    graph: dagre.graphlib.Graph,
+    predicate: (node: ResourceTreeNode, graph: dagre.graphlib.Graph) => boolean
+) {
     const appKey = appNodeKey(app);
     let filtered = 0;
     const nodeArray = graph.nodes();
-    const getRs = flow(
-        filter(node => graph.node(node).kind === 'ReplicaSet'),
-        map(node => graph.node(node)),
-        map(node => ({pUid: node.parentRefs[0].uid, rev: parseInt(node.info[0].value.substr(-1), 10)})),
-        groupBy('pUid'),
-        map(maxBy('rev')),
-        map((node: {pUid: string; rev: number}) => ({...node, rev: `Rev:${node.rev}`}))
-    )(nodeArray);
-
-    const test = (node: any, array: Array<{pUid: string; rev: string}>): boolean => {
-        if (node.kind !== 'ReplicaSet') {
-            return true;
-        }
-        if (
-            isNil(node) ||
-            isNil(node.parentRefs) ||
-            isNil(node.parentRefs[0]) ||
-            isNil(node.parentRefs[0].uid) ||
-            isNil(node.info) ||
-            isNil(node.info[0]) ||
-            isNil(node.info[0].value)
-        ) {
-            return true;
-        }
-        const vals = {pUid: node.parentRefs[0].uid, rev: node.info[0].value};
-        return flow(
-            filter(isEqual(vals)),
-            size,
-            x => x !== 1
-        )(array);
-    };
 
     nodeArray.forEach(nodeId => {
         const node: ResourceTreeNode = graph.node(nodeId) as any;
         const parentIds = graph.predecessors(nodeId);
-        if (node.root != null && !predicate(node) && appKey !== nodeId && test(node, getRs)) {
+        // console.log(node);
+        // console.log(predicate(node));
+        if (node.root != null && !predicate(node, graph) && appKey !== nodeId) {
             const childIds = graph.successors(nodeId);
             graph.removeNode(nodeId);
             filtered++;
@@ -444,6 +416,7 @@ export const ApplicationResourceTree = (props: ApplicationResourceTreeProps) => 
             });
         }
         if (props.nodeFilter) {
+            console.log('b1');
             // show filtered indicator next to external traffic node is app has it otherwise next to internal traffic node
             filterGraph(props.app, externalRoots.length > 0 ? EXTERNAL_TRAFFIC_NODE : INTERNAL_TRAFFIC_NODE, graph, props.nodeFilter);
         }
@@ -452,6 +425,7 @@ export const ApplicationResourceTree = (props: ApplicationResourceTreeProps) => 
         graph.setNode(appNodeKey(props.app), {...appNode, width: NODE_WIDTH, height: NODE_HEIGHT});
         roots.forEach(root => graph.setEdge(appNodeKey(props.app), treeNodeKey(root)));
         if (props.nodeFilter) {
+            console.log('a1');
             filterGraph(props.app, appNodeKey(props.app), graph, props.nodeFilter);
         }
     }
