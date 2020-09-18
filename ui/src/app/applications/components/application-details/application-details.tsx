@@ -1,7 +1,6 @@
 import {Checkbox as ArgoCheckbox, DropDownMenu, MenuItem, NotificationType, SlidingPanel, Tab, Tabs, TopBarFilter} from 'argo-ui';
 import * as classNames from 'classnames';
 import {} from 'lodash';
-import {contains, filter as filterFP, flatMap, flow, get, isNil, map} from 'lodash/fp';
 import * as PropTypes from 'prop-types';
 import * as React from 'react';
 import {Checkbox} from 'react-form';
@@ -136,11 +135,7 @@ export class ApplicationDetails extends React.Component<RouteComponentProps<{nam
                                     },
                                     ...kinds.sort().map(kind => ({value: `kind:${kind}`, label: kind})),
                                     {content: () => <span>Filters</span>},
-                                    {value: 'filters:Test', label: 'Test-Rep'},
-                                    {value: 'filters:ReplicaSets', label: 'Replica sets'},
-                                    {value: 'filters:Test1', label: 'Test-Rep1'},
-                                    {value: 'filters:Test2', label: 'Test-Rep2'},
-                                    {value: 'filters:Test3', label: 'Test-Rep3'}
+                                    {value: 'filters:ReplicaSets', label: 'Replica sets'}
                                 ],
                                 selectedValues: pref.resourceFilter,
                                 selectionChanged: items => {
@@ -482,28 +477,23 @@ export class ApplicationDetails extends React.Component<RouteComponentProps<{nam
     private filterReplicaSetRevisions(node: ResourceTreeNode, graph?: dagre.graphlib.Graph) {
         const nodeArray = graph.nodes();
 
-        const replicaSetName = flow(
-            filterFP(nodeA => graph.node(nodeA).kind === 'Pod'),
-            map(nodeA => graph.node(nodeA)),
-            flatMap(get('parentRefs')),
-            filterFP(parent => parent.kind === 'ReplicaSet'),
-            map(get('name')),
-            // @ts-ignore
-            x => console.log(x) || x
-        )(nodeArray);
+        const replicaSetName = nodeArray
+            .filter(nodeA => graph.node(nodeA).kind === 'Pod')
+            .map(nodeA => graph.node(nodeA).parentRefs)
+            .reduce((prev, curr) => [...prev, ...curr], [])
+            .filter((parent: ResourceTreeNode) => parent.kind === 'ReplicaSet')
+            .map((n: ResourceTreeNode) => n.name);
 
-        console.log(nodeArray);
-        const getRs: string[] = flow(
-            map(nodeA => graph.node(nodeA)),
-            filterFP(nodeA => contains(nodeA.name)(replicaSetName)),
-            map(nodeA => nodeA.uid)
-        )(nodeArray);
+        const getRs: string[] = nodeArray
+            .map(nodeA => graph.node(nodeA))
+            .filter(nodeA => replicaSetName.find((name: string) => name === nodeA.name))
+            .map(nodeA => nodeA.uid);
 
-        const test = (node: any): boolean => {
-            if (node.kind !== 'ReplicaSet') {
+        const test = (nodeTest: ResourceTreeNode): boolean => {
+            if (nodeTest.kind !== 'ReplicaSet') {
                 return true;
             }
-            return contains(node.uid)(getRs);
+            return getRs.find(uid => uid === nodeTest.uid) !== undefined;
         };
 
         return test(node);
@@ -513,11 +503,11 @@ export class ApplicationDetails extends React.Component<RouteComponentProps<{nam
         if (filterList.length === 0) {
             return true;
         }
-        if (isNil(graph)) {
+        if (graph === undefined || graph === null) {
             return true;
         }
 
-        const replicaSets = contains('ReplicaSets')(filterList) ? this.filterReplicaSetRevisions(node, graph) : true;
+        const replicaSets = filterList.find(filterItem => filterItem === 'ReplicaSets') ? this.filterReplicaSetRevisions(node, graph) : true;
 
         return replicaSets;
     }

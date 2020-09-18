@@ -103,8 +103,6 @@ function filterGraph(
     nodeArray.forEach(nodeId => {
         const node: ResourceTreeNode = graph.node(nodeId) as any;
         const parentIds = graph.predecessors(nodeId);
-        // console.log(node);
-        // console.log(predicate(node));
         if (node.root != null && !predicate(node, graph) && appKey !== nodeId) {
             const childIds = graph.successors(nodeId);
             graph.removeNode(nodeId);
@@ -416,7 +414,6 @@ export const ApplicationResourceTree = (props: ApplicationResourceTreeProps) => 
             });
         }
         if (props.nodeFilter) {
-            console.log('b1');
             // show filtered indicator next to external traffic node is app has it otherwise next to internal traffic node
             filterGraph(props.app, externalRoots.length > 0 ? EXTERNAL_TRAFFIC_NODE : INTERNAL_TRAFFIC_NODE, graph, props.nodeFilter);
         }
@@ -425,7 +422,6 @@ export const ApplicationResourceTree = (props: ApplicationResourceTreeProps) => 
         graph.setNode(appNodeKey(props.app), {...appNode, width: NODE_WIDTH, height: NODE_HEIGHT});
         roots.forEach(root => graph.setEdge(appNodeKey(props.app), treeNodeKey(root)));
         if (props.nodeFilter) {
-            console.log('a1');
             filterGraph(props.app, appNodeKey(props.app), graph, props.nodeFilter);
         }
     }
