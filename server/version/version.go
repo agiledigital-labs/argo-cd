@@ -1,38 +1,43 @@
 package version
 
 import (
-	"github.com/argoproj/gitops-engine/pkg/utils/kube"
-	"github.com/golang/protobuf/ptypes/empty"
-	"golang.org/x/net/context"
+	"context"
 
+	"github.com/golang/protobuf/ptypes/empty"
 	"github.com/google/go-jsonnet"
 
-	"github.com/argoproj/argo-cd/common"
-	"github.com/argoproj/argo-cd/pkg/apiclient/version"
-	"github.com/argoproj/argo-cd/util/helm"
-	ksutil "github.com/argoproj/argo-cd/util/ksonnet"
-	"github.com/argoproj/argo-cd/util/kustomize"
+	"github.com/argoproj/argo-cd/v3/common"
+	"github.com/argoproj/argo-cd/v3/pkg/apiclient/version"
+	"github.com/argoproj/argo-cd/v3/server/settings"
+	"github.com/argoproj/argo-cd/v3/util/helm"
+	"github.com/argoproj/argo-cd/v3/util/kustomize"
+	sessionmgr "github.com/argoproj/argo-cd/v3/util/session"
 )
 
 type Server struct {
-	ksonnetVersion   string
 	kustomizeVersion string
 	helmVersion      string
-	kubectlVersion   string
 	jsonnetVersion   string
+	authenticator    settings.Authenticator
+	disableAuth      func() (bool, error)
+}
+
+func NewServer(authenticator settings.Authenticator, disableAuth func() (bool, error)) *Server {
+	return &Server{authenticator: authenticator, disableAuth: disableAuth}
 }
 
 // Version returns the version of the API server
-func (s *Server) Version(context.Context, *empty.Empty) (*version.VersionMessage, error) {
+func (s *Server) Version(ctx context.Context, _ *empty.Empty) (*version.VersionMessage, error) {
 	vers := common.GetVersion()
-	if s.ksonnetVersion == "" {
-		ksonnetVersion, err := ksutil.Version()
-		if err == nil {
-			s.ksonnetVersion = ksonnetVersion
-		} else {
-			s.ksonnetVersion = err.Error()
-		}
+	disableAuth, err := s.disableAuth()
+	if err != nil {
+		return nil, err
 	}
+
+	if !sessionmgr.LoggedIn(ctx) && !disableAuth {
+		return &version.VersionMessage{Version: vers.Version}, nil
+	}
+
 	if s.kustomizeVersion == "" {
 		kustomizeVersion, err := kustomize.Version()
 		if err == nil {
@@ -40,7 +45,6 @@ func (s *Server) Version(context.Context, *empty.Empty) (*version.VersionMessage
 		} else {
 			s.kustomizeVersion = err.Error()
 		}
-
 	}
 	if s.helmVersion == "" {
 		helmVersion, err := helm.Version()
@@ -48,14 +52,6 @@ func (s *Server) Version(context.Context, *empty.Empty) (*version.VersionMessage
 			s.helmVersion = helmVersion
 		} else {
 			s.helmVersion = err.Error()
-		}
-	}
-	if s.kubectlVersion == "" {
-		kubectlVersion, err := kube.Version()
-		if err == nil {
-			s.kubectlVersion = kubectlVersion
-		} else {
-			s.kubectlVersion = err.Error()
 		}
 	}
 	s.jsonnetVersion = jsonnet.Version()
@@ -68,15 +64,19 @@ func (s *Server) Version(context.Context, *empty.Empty) (*version.VersionMessage
 		GoVersion:        vers.GoVersion,
 		Compiler:         vers.Compiler,
 		Platform:         vers.Platform,
-		KsonnetVersion:   s.ksonnetVersion,
 		KustomizeVersion: s.kustomizeVersion,
 		HelmVersion:      s.helmVersion,
-		KubectlVersion:   s.kubectlVersion,
 		JsonnetVersion:   s.jsonnetVersion,
+		KubectlVersion:   vers.KubectlVersion,
+		ExtraBuildInfo:   vers.ExtraBuildInfo,
 	}, nil
 }
 
 // AuthFuncOverride allows the version to be returned without auth
-func (s *Server) AuthFuncOverride(ctx context.Context, fullMethodName string) (context.Context, error) {
+func (s *Server) AuthFuncOverride(ctx context.Context, _ string) (context.Context, error) {
+	if s.authenticator != nil {
+		// this authenticates the user, but ignores any error, so that we have claims populated
+		ctx, _ = s.authenticator.Authenticate(ctx)
+	}
 	return ctx, nil
 }

@@ -8,7 +8,7 @@ exports[`ProgressPopup.0% 1`] = `
     className="popup-container"
   >
     <div
-      className="row popup-container__header"
+      className="row popup-container__header popup-container__header__normal"
     >
       
     </div>
@@ -16,11 +16,11 @@ exports[`ProgressPopup.0% 1`] = `
       className="row popup-container__body"
     >
       <div
-        className="columns large-12"
+        className="columns large-12 popup-container__body__hasNoIcon"
       >
         <div
           style={
-            Object {
+            {
               "background": "#CCD6DD",
               "borderRadius": "5px",
               "height": "10px",
@@ -31,7 +31,7 @@ exports[`ProgressPopup.0% 1`] = `
         >
           <div
             style={
-              Object {
+              {
                 "background": "#18BE94",
                 "borderRadius": "inherit",
                 "height": "100%",
@@ -48,7 +48,7 @@ exports[`ProgressPopup.0% 1`] = `
     >
       <div
         style={
-          Object {
+          {
             "textAlign": "right",
           }
         }
@@ -66,7 +66,7 @@ exports[`ProgressPopup.50% 1`] = `
     className="popup-container"
   >
     <div
-      className="row popup-container__header"
+      className="row popup-container__header popup-container__header__normal"
     >
       My Title
     </div>
@@ -74,11 +74,11 @@ exports[`ProgressPopup.50% 1`] = `
       className="row popup-container__body"
     >
       <div
-        className="columns large-12"
+        className="columns large-12 popup-container__body__hasNoIcon"
       >
         <div
           style={
-            Object {
+            {
               "background": "#CCD6DD",
               "borderRadius": "5px",
               "height": "10px",
@@ -89,7 +89,7 @@ exports[`ProgressPopup.50% 1`] = `
         >
           <div
             style={
-              Object {
+              {
                 "background": "#18BE94",
                 "borderRadius": "inherit",
                 "height": "100%",
@@ -106,7 +106,7 @@ exports[`ProgressPopup.50% 1`] = `
     >
       <div
         style={
-          Object {
+          {
             "textAlign": "right",
           }
         }
@@ -124,7 +124,7 @@ exports[`ProgressPopup.100% 1`] = `
     className="popup-container"
   >
     <div
-      className="row popup-container__header"
+      className="row popup-container__header popup-container__header__normal"
     >
       
     </div>
@@ -132,11 +132,11 @@ exports[`ProgressPopup.100% 1`] = `
       className="row popup-container__body"
     >
       <div
-        className="columns large-12"
+        className="columns large-12 popup-container__body__hasNoIcon"
       >
         <div
           style={
-            Object {
+            {
               "background": "#CCD6DD",
               "borderRadius": "5px",
               "height": "10px",
@@ -147,7 +147,7 @@ exports[`ProgressPopup.100% 1`] = `
         >
           <div
             style={
-              Object {
+              {
                 "background": "#18BE94",
                 "borderRadius": "inherit",
                 "height": "100%",
@@ -164,7 +164,7 @@ exports[`ProgressPopup.100% 1`] = `
     >
       <div
         style={
-          Object {
+          {
             "textAlign": "right",
           }
         }

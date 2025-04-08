@@ -5,5 +5,7 @@
   "singleQuote": true,
   "tabWidth": 4,
   "jsxBracketSameLine": true,
-  "quoteProps": "consistent"
+  "quoteProps": "consistent",
+  "arrowParens": "avoid",
+  "trailingComma": "none"
 }

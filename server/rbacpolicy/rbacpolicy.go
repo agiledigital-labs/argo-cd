@@ -3,52 +3,14 @@ package rbacpolicy
 import (
 	"strings"
 
-	jwt "github.com/dgrijalva/jwt-go"
+	"github.com/golang-jwt/jwt/v5"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/argoproj/argo-cd/pkg/apis/application/v1alpha1"
-	applister "github.com/argoproj/argo-cd/pkg/client/listers/application/v1alpha1"
-	jwtutil "github.com/argoproj/argo-cd/util/jwt"
-	"github.com/argoproj/argo-cd/util/rbac"
-)
-
-const (
-	// please add new items to Resources
-	ResourceClusters     = "clusters"
-	ResourceProjects     = "projects"
-	ResourceApplications = "applications"
-	ResourceRepositories = "repositories"
-	ResourceCertificates = "certificates"
-	ResourceAccounts     = "accounts"
-	ResourceGPGKeys      = "gpgkeys"
-
-	// please add new items to Actions
-	ActionGet      = "get"
-	ActionCreate   = "create"
-	ActionUpdate   = "update"
-	ActionDelete   = "delete"
-	ActionSync     = "sync"
-	ActionOverride = "override"
-	ActionAction   = "action"
-)
-
-var (
-	defaultScopes = []string{"groups"}
-	Resources     = []string{
-		ResourceClusters,
-		ResourceProjects,
-		ResourceApplications,
-		ResourceRepositories,
-		ResourceCertificates,
-	}
-	Actions = []string{
-		ActionGet,
-		ActionCreate,
-		ActionUpdate,
-		ActionDelete,
-		ActionSync,
-		ActionOverride,
-	}
+	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	applister "github.com/argoproj/argo-cd/v3/pkg/client/listers/application/v1alpha1"
+	claimsutil "github.com/argoproj/argo-cd/v3/util/claims"
+	jwtutil "github.com/argoproj/argo-cd/v3/util/jwt"
+	"github.com/argoproj/argo-cd/v3/util/rbac"
 )
 
 // RBACPolicyEnforcer provides an RBAC Claims Enforcer which additionally consults AppProject
@@ -76,61 +38,92 @@ func (p *RBACPolicyEnforcer) SetScopes(scopes []string) {
 func (p *RBACPolicyEnforcer) GetScopes() []string {
 	scopes := p.scopes
 	if scopes == nil {
-		scopes = defaultScopes
+		scopes = rbac.DefaultScopes
 	}
 	return scopes
 }
 
 func IsProjectSubject(subject string) bool {
-	return strings.HasPrefix(subject, "proj:")
+	_, _, ok := GetProjectRoleFromSubject(subject)
+	return ok
+}
+
+func GetProjectRoleFromSubject(subject string) (string, string, bool) {
+	parts := strings.Split(subject, ":")
+	if len(parts) == 3 && parts[0] == "proj" {
+		return parts[1], parts[2], true
+	}
+	return "", "", false
 }
 
 // EnforceClaims is an RBAC claims enforcer specific to the Argo CD API server
-func (p *RBACPolicyEnforcer) EnforceClaims(claims jwt.Claims, rvals ...interface{}) bool {
+func (p *RBACPolicyEnforcer) EnforceClaims(claims jwt.Claims, rvals ...any) bool {
 	mapClaims, err := jwtutil.MapClaims(claims)
 	if err != nil {
 		return false
 	}
+	argoClaims, err := claimsutil.MapClaimsToArgoClaims(mapClaims)
+	if err != nil {
+		return false
+	}
 
-	subject := jwtutil.GetField(mapClaims, "sub")
+	subject := argoClaims.GetUserIdentifier()
 	// Check if the request is for an application resource. We have special enforcement which takes
 	// into consideration the project's token and group bindings
 	var runtimePolicy string
+	var projName string
 	proj := p.getProjectFromRequest(rvals...)
 	if proj != nil {
 		if IsProjectSubject(subject) {
-			return p.enforceProjectToken(subject, mapClaims, proj, rvals...)
+			return p.enforceProjectToken(subject, proj, rvals...)
 		}
 		runtimePolicy = proj.ProjectPoliciesString()
+		projName = proj.Name
 	}
 
+	// NOTE: This calls prevent multiple creation of the wrapped enforcer
+	enforcer := p.enf.CreateEnforcerWithRuntimePolicy(projName, runtimePolicy)
+
 	// Check the subject. This is typically the 'admin' case.
-	// NOTE: the call to EnforceRuntimePolicy will also consider the default role
-	vals := append([]interface{}{subject}, rvals[1:]...)
-	if p.enf.EnforceRuntimePolicy(runtimePolicy, vals...) {
+	// NOTE: the call to EnforceWithCustomEnforcer will also consider the default role
+	vals := append([]any{subject}, rvals[1:]...)
+	if p.enf.EnforceWithCustomEnforcer(enforcer, vals...) {
 		return true
 	}
 
 	scopes := p.scopes
 	if scopes == nil {
-		scopes = defaultScopes
+		scopes = rbac.DefaultScopes
 	}
 	// Finally check if any of the user's groups grant them permissions
 	groups := jwtutil.GetScopeValues(mapClaims, scopes)
-	for _, group := range groups {
-		vals := append([]interface{}{group}, rvals[1:]...)
-		if p.enf.EnforceRuntimePolicy(runtimePolicy, vals...) {
-			return true
+
+	// Get groups to reduce the amount to checking groups
+	groupingPolicies, err := enforcer.GetGroupingPolicy()
+	if err != nil {
+		log.WithError(err).Error("failed to get grouping policy")
+		return false
+	}
+	for gidx := range groups {
+		for gpidx := range groupingPolicies {
+			// Prefilter user groups by groups defined in the model
+			if groupingPolicies[gpidx][0] == groups[gidx] {
+				vals := append([]any{groups[gidx]}, rvals[1:]...)
+				if p.enf.EnforceWithCustomEnforcer(enforcer, vals...) {
+					return true
+				}
+				break
+			}
 		}
 	}
-	logCtx := log.WithField("claims", claims).WithField("rval", rvals)
+	logCtx := log.WithFields(log.Fields{"claims": claims, "rval": rvals, "subject": subject, "groups": groups, "project": projName, "scopes": scopes})
 	logCtx.Debug("enforce failed")
 	return false
 }
 
 // getProjectFromRequest parses the project name from the RBAC request and returns the associated
 // project (if it exists)
-func (p *RBACPolicyEnforcer) getProjectFromRequest(rvals ...interface{}) *v1alpha1.AppProject {
+func (p *RBACPolicyEnforcer) getProjectFromRequest(rvals ...any) *v1alpha1.AppProject {
 	if len(rvals) != 4 {
 		return nil
 	}
@@ -144,11 +137,11 @@ func (p *RBACPolicyEnforcer) getProjectFromRequest(rvals ...interface{}) *v1alph
 	if res, ok := rvals[1].(string); ok {
 		if obj, ok := rvals[3].(string); ok {
 			switch res {
-			case ResourceApplications:
-				if objSplit := strings.Split(obj, "/"); len(objSplit) == 2 {
+			case rbac.ResourceApplications, rbac.ResourceRepositories, rbac.ResourceClusters, rbac.ResourceLogs, rbac.ResourceExec:
+				if objSplit := strings.Split(obj, "/"); len(objSplit) >= 2 {
 					return getProjectByName(objSplit[0])
 				}
-			case ResourceProjects:
+			case rbac.ResourceProjects:
 				// we also automatically give project tokens and groups 'get' access to the project
 				return getProjectByName(obj)
 			}
@@ -158,32 +151,17 @@ func (p *RBACPolicyEnforcer) getProjectFromRequest(rvals ...interface{}) *v1alph
 }
 
 // enforceProjectToken will check to see the valid token has not yet been revoked in the project
-func (p *RBACPolicyEnforcer) enforceProjectToken(subject string, claims jwt.MapClaims, proj *v1alpha1.AppProject, rvals ...interface{}) bool {
+func (p *RBACPolicyEnforcer) enforceProjectToken(subject string, proj *v1alpha1.AppProject, rvals ...any) bool {
 	subjectSplit := strings.Split(subject, ":")
 	if len(subjectSplit) != 3 {
 		return false
 	}
-	projName, roleName := subjectSplit[1], subjectSplit[2]
+	projName, _ := subjectSplit[1], subjectSplit[2]
 	if projName != proj.Name {
 		// this should never happen (we generated a project token for a different project)
 		return false
 	}
 
-	var iat int64 = -1
-	jti, err := jwtutil.GetID(claims)
-	if err != nil || jti == "" {
-		iat, err = jwtutil.GetIssuedAt(claims)
-		if err != nil {
-			return false
-		}
-	}
-
-	_, _, err = proj.GetJWTToken(roleName, iat, jti)
-	if err != nil {
-		// if we get here the token is still valid, but has been revoked (no longer exists in the project)
-		return false
-	}
-	vals := append([]interface{}{subject}, rvals[1:]...)
-	return p.enf.EnforceRuntimePolicy(proj.ProjectPoliciesString(), vals...)
-
+	vals := append([]any{subject}, rvals[1:]...)
+	return p.enf.EnforceRuntimePolicy(proj.Name, proj.ProjectPoliciesString(), vals...)
 }

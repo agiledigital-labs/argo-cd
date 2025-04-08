@@ -7,13 +7,13 @@ import (
 
 	"github.com/argoproj/gitops-engine/pkg/health"
 	. "github.com/argoproj/gitops-engine/pkg/sync/common"
-	. "github.com/argoproj/gitops-engine/pkg/utils/errors"
+	"github.com/stretchr/testify/require"
 
-	. "github.com/argoproj/argo-cd/pkg/apis/application/v1alpha1"
-	"github.com/argoproj/argo-cd/test/e2e/fixture"
-	. "github.com/argoproj/argo-cd/test/e2e/fixture"
-	. "github.com/argoproj/argo-cd/test/e2e/fixture/app"
-	"github.com/argoproj/argo-cd/util/rand"
+	. "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	"github.com/argoproj/argo-cd/v3/test/e2e/fixture"
+	. "github.com/argoproj/argo-cd/v3/test/e2e/fixture/app"
+	"github.com/argoproj/argo-cd/v3/util/errors"
+	"github.com/argoproj/argo-cd/v3/util/rand"
 )
 
 // when you selectively sync, only selected resources should be synced, but the app will be out of sync
@@ -22,7 +22,7 @@ func TestSelectiveSync(t *testing.T) {
 		Path("guestbook").
 		SelectedResource(":Service:guestbook-ui").
 		When().
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(Success("")).
@@ -39,7 +39,7 @@ func TestSelectiveSyncDoesNotRunHooks(t *testing.T) {
 		Path("hook").
 		SelectedResource(":Pod:pod").
 		When().
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(Success("")).
@@ -53,19 +53,21 @@ func TestSelectiveSyncDoesNotRunHooks(t *testing.T) {
 func TestSelectiveSyncWithoutNamespace(t *testing.T) {
 	selectedResourceNamespace := getNewNamespace(t)
 	defer func() {
-		FailOnErr(Run("", "kubectl", "delete", "namespace", selectedResourceNamespace))
+		if !t.Skipped() {
+			errors.NewHandler(t).FailOnErr(fixture.Run("", "kubectl", "delete", "namespace", selectedResourceNamespace))
+		}
 	}()
 	Given(t).
 		Prune(true).
 		Path("guestbook-with-namespace").
 		And(func() {
-			FailOnErr(Run("", "kubectl", "create", "namespace", selectedResourceNamespace))
+			errors.NewHandler(t).FailOnErr(fixture.Run("", "kubectl", "create", "namespace", selectedResourceNamespace))
 		}).
 		SelectedResource("apps:Deployment:guestbook-ui").
 		When().
 		PatchFile("guestbook-ui-deployment-ns.yaml", fmt.Sprintf(`[{"op": "replace", "path": "/metadata/namespace", "value": "%s"}]`, selectedResourceNamespace)).
 		PatchFile("guestbook-ui-svc-ns.yaml", fmt.Sprintf(`[{"op": "replace", "path": "/metadata/namespace", "value": "%s"}]`, selectedResourceNamespace)).
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(Success("")).
@@ -77,23 +79,25 @@ func TestSelectiveSyncWithoutNamespace(t *testing.T) {
 		Expect(ResourceSyncStatusWithNamespaceIs("Deployment", "guestbook-ui", fixture.DeploymentNamespace(), SyncStatusCodeSynced))
 }
 
-//In selectedResource to sync, namespace is provided
+// In selectedResource to sync, namespace is provided
 func TestSelectiveSyncWithNamespace(t *testing.T) {
 	selectedResourceNamespace := getNewNamespace(t)
 	defer func() {
-		FailOnErr(Run("", "kubectl", "delete", "namespace", selectedResourceNamespace))
+		if !t.Skipped() {
+			errors.NewHandler(t).FailOnErr(fixture.Run("", "kubectl", "delete", "namespace", selectedResourceNamespace))
+		}
 	}()
 	Given(t).
 		Prune(true).
 		Path("guestbook-with-namespace").
 		And(func() {
-			FailOnErr(Run("", "kubectl", "create", "namespace", selectedResourceNamespace))
+			errors.NewHandler(t).FailOnErr(fixture.Run("", "kubectl", "create", "namespace", selectedResourceNamespace))
 		}).
 		SelectedResource(fmt.Sprintf("apps:Deployment:%s/guestbook-ui", selectedResourceNamespace)).
 		When().
 		PatchFile("guestbook-ui-deployment-ns.yaml", fmt.Sprintf(`[{"op": "replace", "path": "/metadata/namespace", "value": "%s"}]`, selectedResourceNamespace)).
 		PatchFile("guestbook-ui-svc-ns.yaml", fmt.Sprintf(`[{"op": "replace", "path": "/metadata/namespace", "value": "%s"}]`, selectedResourceNamespace)).
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(Success("")).
@@ -106,7 +110,10 @@ func TestSelectiveSyncWithNamespace(t *testing.T) {
 }
 
 func getNewNamespace(t *testing.T) string {
-	postFix := "-" + strings.ToLower(rand.RandString(5))
+	t.Helper()
+	randStr, err := rand.String(5)
+	require.NoError(t, err)
+	postFix := "-" + strings.ToLower(randStr)
 	name := fixture.DnsFriendly(t.Name(), "")
-	return fixture.DnsFriendly(fmt.Sprintf("argocd-e2e-%s", name), postFix)
+	return fixture.DnsFriendly("argocd-e2e-"+name, postFix)
 }

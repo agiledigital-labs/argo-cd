@@ -9,56 +9,42 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
-	"github.com/dgrijalva/jwt-go"
+	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/argoproj/argo-cd/common"
-	"github.com/argoproj/argo-cd/server/rbacpolicy"
-	"github.com/argoproj/argo-cd/util/cache/appstate"
-	"github.com/argoproj/argo-cd/util/dex"
-	"github.com/argoproj/argo-cd/util/env"
-	httputil "github.com/argoproj/argo-cd/util/http"
-	jwtutil "github.com/argoproj/argo-cd/util/jwt"
-	oidcutil "github.com/argoproj/argo-cd/util/oidc"
-	passwordutil "github.com/argoproj/argo-cd/util/password"
-	"github.com/argoproj/argo-cd/util/settings"
+	"github.com/argoproj/argo-cd/v3/server/rbacpolicy"
+
+	"github.com/argoproj/argo-cd/v3/common"
+	"github.com/argoproj/argo-cd/v3/pkg/client/listers/application/v1alpha1"
+	"github.com/argoproj/argo-cd/v3/util/cache/appstate"
+	claimsutil "github.com/argoproj/argo-cd/v3/util/claims"
+	"github.com/argoproj/argo-cd/v3/util/dex"
+	"github.com/argoproj/argo-cd/v3/util/env"
+	httputil "github.com/argoproj/argo-cd/v3/util/http"
+	jwtutil "github.com/argoproj/argo-cd/v3/util/jwt"
+	oidcutil "github.com/argoproj/argo-cd/v3/util/oidc"
+	passwordutil "github.com/argoproj/argo-cd/v3/util/password"
+	"github.com/argoproj/argo-cd/v3/util/settings"
 )
 
 // SessionManager generates and validates JWT tokens for login sessions.
 type SessionManager struct {
 	settingsMgr                   *settings.SettingsManager
+	projectsLister                v1alpha1.AppProjectNamespaceLister
 	client                        *http.Client
 	prov                          oidcutil.Provider
 	storage                       UserStateStorage
 	sleep                         func(d time.Duration)
 	verificationDelayNoiseEnabled bool
-}
-
-type inMemoryUserStateStorage struct {
-	attempts map[string]LoginAttempts
-}
-
-func NewInMemoryUserStateStorage() *inMemoryUserStateStorage {
-	return &inMemoryUserStateStorage{attempts: map[string]LoginAttempts{}}
-}
-
-func (storage *inMemoryUserStateStorage) GetLoginAttempts(attempts *map[string]LoginAttempts) error {
-	*attempts = storage.attempts
-	return nil
-}
-
-func (storage *inMemoryUserStateStorage) SetLoginAttempts(attempts map[string]LoginAttempts) error {
-	storage.attempts = attempts
-	return nil
-}
-
-type UserStateStorage interface {
-	GetLoginAttempts(attempts *map[string]LoginAttempts) error
-	SetLoginAttempts(attempts map[string]LoginAttempts) error
+	failedLock                    sync.RWMutex
 }
 
 // LoginAttempts is a timestamped counter for failed login attempts
@@ -72,19 +58,22 @@ type LoginAttempts struct {
 const (
 	// SessionManagerClaimsIssuer fills the "iss" field of the token.
 	SessionManagerClaimsIssuer = "argocd"
+	AuthErrorCtxKey            = "auth-error"
 
 	// invalidLoginError, for security purposes, doesn't say whether the username or password was invalid.  This does not mitigate the potential for timing attacks to determine which is which.
-	invalidLoginError    = "Invalid username or password"
-	blankPasswordError   = "Blank passwords are not allowed"
-	accountDisabled      = "Account %s is disabled"
-	usernameTooLongError = "Username is too long (%d bytes max)"
+	invalidLoginError           = "Invalid username or password"
+	blankPasswordError          = "Blank passwords are not allowed"
+	accountDisabled             = "Account %s is disabled"
+	usernameTooLongError        = "Username is too long (%d bytes max)"
+	userDoesNotHaveCapability   = "Account %s does not have %s capability"
+	autoRegenerateTokenDuration = time.Minute * 5
 )
 
 const (
 	// Maximum length of username, too keep the cache's memory signature low
 	maxUsernameLength = 32
 	// The default maximum session cache size
-	defaultMaxCacheSize = 1000
+	defaultMaxCacheSize = 10000
 	// The default number of maximum login failures before delay kicks in
 	defaultMaxLoginFailures = 5
 	// The default time in seconds for the failure window
@@ -106,9 +95,7 @@ const (
 	envLoginMaxCacheSize = "ARGOCD_SESSION_MAX_CACHE_SIZE"
 )
 
-var (
-	InvalidLoginErr = status.Errorf(codes.Unauthenticated, invalidLoginError)
-)
+var InvalidLoginErr = status.Errorf(codes.Unauthenticated, invalidLoginError)
 
 // Returns the maximum cache size as number of entries
 func getMaximumCacheSize() int {
@@ -126,35 +113,39 @@ func getLoginFailureWindow() time.Duration {
 }
 
 // NewSessionManager creates a new session manager from Argo CD settings
-func NewSessionManager(settingsMgr *settings.SettingsManager, dexServerAddr string, storage UserStateStorage) *SessionManager {
+func NewSessionManager(settingsMgr *settings.SettingsManager, projectsLister v1alpha1.AppProjectNamespaceLister, dexServerAddr string, dexTLSConfig *dex.DexTLSConfig, storage UserStateStorage) *SessionManager {
 	s := SessionManager{
 		settingsMgr:                   settingsMgr,
 		storage:                       storage,
 		sleep:                         time.Sleep,
+		projectsLister:                projectsLister,
 		verificationDelayNoiseEnabled: true,
 	}
 	settings, err := settingsMgr.GetSettings()
 	if err != nil {
 		panic(err)
 	}
-	tlsConfig := settings.TLSConfig()
-	if tlsConfig != nil {
-		tlsConfig.InsecureSkipVerify = true
+
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		Dial: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).Dial,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
+
 	s.client = &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: tlsConfig,
-			Proxy:           http.ProxyFromEnvironment,
-			Dial: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).Dial,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
+		Transport: transport,
 	}
+
 	if settings.DexConfig != "" {
-		s.client.Transport = dex.NewDexRewriteURLRoundTripper(dexServerAddr, s.client.Transport)
+		transport.TLSClientConfig = dex.TLSConfig(dexTLSConfig)
+		addrWithProto := dex.DexServerAddressWithProtocol(dexServerAddr, dexTLSConfig)
+		s.client.Transport = dex.NewDexRewriteURLRoundTripper(addrWithProto, s.client.Transport)
+	} else {
+		transport.TLSClientConfig = settings.OIDCTLSConfig()
 	}
 	if os.Getenv(common.EnvVarSSODebug) == "1" {
 		s.client.Transport = httputil.DebugTransport{T: s.client.Transport}
@@ -167,26 +158,25 @@ func NewSessionManager(settingsMgr *settings.SettingsManager, dexServerAddr stri
 // Passing a value of `0` for secondsBeforeExpiry creates a token that never expires.
 // The id parameter holds an optional unique JWT token identifier and stored as a standard claim "jti" in the JWT token.
 func (mgr *SessionManager) Create(subject string, secondsBeforeExpiry int64, id string) (string, error) {
-	// Create a new token object, specifying signing method and the claims
-	// you would like it to contain.
 	now := time.Now().UTC()
-	claims := jwt.StandardClaims{
-		IssuedAt:  now.Unix(),
-		Issuer:    SessionManagerClaimsIssuer,
-		NotBefore: now.Unix(),
-		Subject:   subject,
-		Id:        id,
+	claims := claimsutil.ArgoClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt:  jwt.NewNumericDate(now),
+			Issuer:    SessionManagerClaimsIssuer,
+			NotBefore: jwt.NewNumericDate(now),
+			Subject:   subject,
+			ID:        id,
+		},
 	}
 	if secondsBeforeExpiry > 0 {
 		expires := now.Add(time.Duration(secondsBeforeExpiry) * time.Second)
-		claims.ExpiresAt = expires.Unix()
+		claims.ExpiresAt = jwt.NewNumericDate(expires)
 	}
 
 	return mgr.signClaims(claims)
 }
 
 func (mgr *SessionManager) signClaims(claims jwt.Claims) (string, error) {
-	log.Infof("Issuing claims: %v", claims)
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	settings, err := mgr.settingsMgr.GetSettings()
 	if err != nil {
@@ -195,56 +185,118 @@ func (mgr *SessionManager) signClaims(claims jwt.Claims) (string, error) {
 	return token.SignedString(settings.ServerSignature)
 }
 
+// GetSubjectAccountAndCapability analyzes Argo CD account token subject and extract account name
+// and the capability it was generated for (default capability is API Key).
+func GetSubjectAccountAndCapability(subject string) (string, settings.AccountCapability) {
+	capability := settings.AccountCapabilityApiKey
+	if parts := strings.Split(subject, ":"); len(parts) > 1 {
+		subject = parts[0]
+		switch parts[1] {
+		case string(settings.AccountCapabilityLogin):
+			capability = settings.AccountCapabilityLogin
+		case string(settings.AccountCapabilityApiKey):
+			capability = settings.AccountCapabilityApiKey
+		}
+	}
+	return subject, capability
+}
+
 // Parse tries to parse the provided string and returns the token claims for local login.
-func (mgr *SessionManager) Parse(tokenString string) (jwt.Claims, error) {
+func (mgr *SessionManager) Parse(tokenString string) (jwt.Claims, string, error) {
 	// Parse takes the token string and a function for looking up the key. The latter is especially
 	// useful if you use multiple keys for your application.  The standard is to use 'kid' in the
 	// head of the token to identify which key to use, but the parsed token (head and claims) is provided
 	// to the callback, providing flexibility.
 	var claims jwt.MapClaims
-	settings, err := mgr.settingsMgr.GetSettings()
+	argoCDSettings, err := mgr.settingsMgr.GetSettings()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	token, err := jwt.ParseWithClaims(tokenString, &claims, func(token *jwt.Token) (interface{}, error) {
+	token, err := jwt.ParseWithClaims(tokenString, &claims, func(token *jwt.Token) (any, error) {
 		// Don't forget to validate the alg is what you expect:
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
-		return settings.ServerSignature, nil
+		return argoCDSettings.ServerSignature, nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	argoClaims, err := claimsutil.MapClaimsToArgoClaims(claims)
+	if err != nil {
+		return nil, "", err
 	}
 
-	subject := jwtutil.GetField(claims, "sub")
-	if rbacpolicy.IsProjectSubject(subject) {
-		return token.Claims, nil
+	issuedAt, err := jwtutil.IssuedAtTime(claims)
+	if err != nil {
+		return nil, "", err
 	}
+
+	subject := argoClaims.GetUserIdentifier()
+	id := jwtutil.StringField(claims, "jti")
+
+	if projName, role, ok := rbacpolicy.GetProjectRoleFromSubject(subject); ok {
+		proj, err := mgr.projectsLister.Get(projName)
+		if err != nil {
+			return nil, "", err
+		}
+		_, _, err = proj.GetJWTToken(role, issuedAt.Unix(), id)
+		if err != nil {
+			return nil, "", err
+		}
+
+		return token.Claims, "", nil
+	}
+
+	subject, capability := GetSubjectAccountAndCapability(subject)
+	claims["sub"] = subject
 
 	account, err := mgr.settingsMgr.GetAccount(subject)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
-	if id := jwtutil.GetField(claims, "jti"); id != "" && account.TokenIndex(id) == -1 {
-		return nil, fmt.Errorf("account %s does not have token with id %s", subject, id)
+	if !account.Enabled {
+		return nil, "", fmt.Errorf("account %s is disabled", subject)
 	}
 
-	issuedAt := time.Unix(int64(claims["iat"].(float64)), 0)
+	if !account.HasCapability(capability) {
+		return nil, "", fmt.Errorf("account %s does not have '%s' capability", subject, capability)
+	}
+
+	if id == "" || mgr.storage.IsTokenRevoked(id) {
+		return nil, "", errors.New("token is revoked, please re-login")
+	} else if capability == settings.AccountCapabilityApiKey && account.TokenIndex(id) == -1 {
+		return nil, "", fmt.Errorf("account %s does not have token with id %s", subject, id)
+	}
+
 	if account.PasswordMtime != nil && issuedAt.Before(*account.PasswordMtime) {
-		return nil, fmt.Errorf("Account password has changed since token issued")
+		return nil, "", errors.New("account password has changed since token issued")
 	}
-	return token.Claims, nil
+
+	newToken := ""
+	if exp, err := jwtutil.ExpirationTime(claims); err == nil {
+		tokenExpDuration := exp.Sub(issuedAt)
+		remainingDuration := time.Until(exp)
+
+		if remainingDuration < autoRegenerateTokenDuration && capability == settings.AccountCapabilityLogin {
+			if uniqueId, err := uuid.NewRandom(); err == nil {
+				if val, err := mgr.Create(fmt.Sprintf("%s:%s", subject, settings.AccountCapabilityLogin), int64(tokenExpDuration.Seconds()), uniqueId.String()); err == nil {
+					newToken = val
+				}
+			}
+		}
+	}
+	return token.Claims, newToken, nil
 }
 
-// GetLoginFailures retrieves the login failure information from the cache
+// GetLoginFailures retrieves the login failure information from the cache. Any modifications to the LoginAttemps map must be done in a thread-safe manner.
 func (mgr *SessionManager) GetLoginFailures() map[string]LoginAttempts {
 	// Get failures from the cache
 	var failures map[string]LoginAttempts
 	err := mgr.storage.GetLoginAttempts(&failures)
 	if err != nil {
-		if err != appstate.ErrCacheMiss {
+		if !errors.Is(err, appstate.ErrCacheMiss) {
 			log.Errorf("Could not retrieve login attempts: %v", err)
 		}
 		failures = make(map[string]LoginAttempts)
@@ -253,25 +305,43 @@ func (mgr *SessionManager) GetLoginFailures() map[string]LoginAttempts {
 	return failures
 }
 
-func expireOldFailedAttempts(maxAge time.Duration, failures *map[string]LoginAttempts) int {
+func expireOldFailedAttempts(maxAge time.Duration, failures map[string]LoginAttempts) int {
 	expiredCount := 0
-	for key, attempt := range *failures {
+	for key, attempt := range failures {
 		if time.Since(attempt.LastFailed) > maxAge*time.Second {
-			expiredCount += 1
-			delete(*failures, key)
+			expiredCount++
+			delete(failures, key)
 		}
 	}
 	return expiredCount
 }
 
+// Protect admin user from login attempt reset caused by attempts to overflow cache in a brute force attack. Instead remove random non-admin to make room in cache.
+func pickRandomNonAdminLoginFailure(failures map[string]LoginAttempts, username string) *string {
+	idx := rand.Intn(len(failures) - 1)
+	i := 0
+	for key := range failures {
+		if i == idx {
+			if key == common.ArgoCDAdminUsername || key == username {
+				return pickRandomNonAdminLoginFailure(failures, username)
+			}
+			return &key
+		}
+		i++
+	}
+	return nil
+}
+
 // Updates the failure count for a given username. If failed is true, increases the counter. Otherwise, sets counter back to 0.
 func (mgr *SessionManager) updateFailureCount(username string, failed bool) {
+	mgr.failedLock.Lock()
+	defer mgr.failedLock.Unlock()
 
 	failures := mgr.GetLoginFailures()
 
 	// Expire old entries in the cache if we have a failure window defined.
 	if window := getLoginFailureWindow(); window > 0 {
-		count := expireOldFailedAttempts(window, &failures)
+		count := expireOldFailedAttempts(window, failures)
 		if count > 0 {
 			log.Infof("Expired %d entries from session cache due to max age reached", count)
 		}
@@ -281,23 +351,13 @@ func (mgr *SessionManager) updateFailureCount(username string, failed bool) {
 	// prevent overbloating the cache with fake entries, as this could lead to
 	// memory exhaustion and ultimately in a DoS. We remove a single entry to
 	// replace it with the new one.
-	//
-	// Chances are that we remove the one that is under active attack, but this
-	// chance is low (1:cache_size)
 	if failed && len(failures) >= getMaximumCacheSize() {
 		log.Warnf("Session cache size exceeds %d entries, removing random entry", getMaximumCacheSize())
-		idx := rand.Intn(len(failures) - 1)
-		var rmUser string
-		i := 0
-		for key := range failures {
-			if i == idx {
-				rmUser = key
-				delete(failures, key)
-				break
-			}
-			i++
+		rmUser := pickRandomNonAdminLoginFailure(failures, username)
+		if rmUser != nil {
+			delete(failures, *rmUser)
+			log.Infof("Deleted entry for user %s from cache", *rmUser)
 		}
-		log.Infof("Deleted entry for user %s from cache", rmUser)
 	}
 
 	attempt, ok := failures[username]
@@ -308,26 +368,25 @@ func (mgr *SessionManager) updateFailureCount(username string, failed bool) {
 	// On login failure, increase fail count and update last failed timestamp.
 	// On login success, remove the entry from the cache.
 	if failed {
-		attempt.FailCount += 1
+		attempt.FailCount++
 		attempt.LastFailed = time.Now()
 		failures[username] = attempt
 		log.Warnf("User %s failed login %d time(s)", username, attempt.FailCount)
-	} else {
-		if attempt.FailCount > 0 {
-			// Forget username for cache size enforcement, since entry in cache was deleted
-			delete(failures, username)
-		}
+	} else if attempt.FailCount > 0 {
+		// Forget username for cache size enforcement, since entry in cache was deleted
+		delete(failures, username)
 	}
 
 	err := mgr.storage.SetLoginAttempts(failures)
 	if err != nil {
 		log.Errorf("Could not update login attempts: %v", err)
 	}
-
 }
 
 // Get the current login failure attempts for given username
 func (mgr *SessionManager) getFailureCount(username string) LoginAttempts {
+	mgr.failedLock.RLock()
+	defer mgr.failedLock.RUnlock()
 	failures := mgr.GetLoginFailures()
 	attempt, ok := failures[username]
 	if !ok {
@@ -373,7 +432,7 @@ func (mgr *SessionManager) VerifyUsernamePassword(username string, password stri
 			// introduces random delay to protect from timing-based user enumeration attack
 			delayNanoseconds := verificationDelayNoiseMin.Nanoseconds() +
 				int64(rand.Intn(int(verificationDelayNoiseMax.Nanoseconds()-verificationDelayNoiseMin.Nanoseconds())))
-				// take into account amount of time spent since the request start
+			// take into account amount of time spent since the request start
 			delayNanoseconds = delayNanoseconds - time.Since(start).Nanoseconds()
 			if delayNanoseconds > 0 {
 				mgr.sleep(time.Duration(delayNanoseconds))
@@ -399,31 +458,77 @@ func (mgr *SessionManager) VerifyUsernamePassword(username string, password stri
 		_, _ = passwordutil.HashPassword("for_consistent_response_time")
 		return err
 	}
-	if !account.Enabled {
-		return status.Errorf(codes.Unauthenticated, accountDisabled, username)
-	}
 
 	valid, _ := passwordutil.VerifyPassword(password, account.PasswordHash)
 	if !valid {
 		mgr.updateFailureCount(username, true)
 		return InvalidLoginErr
 	}
+
+	if !account.Enabled {
+		return status.Errorf(codes.Unauthenticated, accountDisabled, username)
+	}
+
+	if !account.HasCapability(settings.AccountCapabilityLogin) {
+		return status.Errorf(codes.Unauthenticated, userDoesNotHaveCapability, username, settings.AccountCapabilityLogin)
+	}
 	mgr.updateFailureCount(username, false)
 	return nil
 }
 
+// AuthMiddlewareFunc returns a function that can be used as an
+// authentication middleware for HTTP requests.
+func (mgr *SessionManager) AuthMiddlewareFunc(disabled bool) func(http.Handler) http.Handler {
+	return func(h http.Handler) http.Handler {
+		return WithAuthMiddleware(disabled, mgr, h)
+	}
+}
+
+// TokenVerifier defines the contract to invoke token
+// verification logic
+type TokenVerifier interface {
+	VerifyToken(token string) (jwt.Claims, string, error)
+}
+
+// WithAuthMiddleware is an HTTP middleware used to ensure incoming
+// requests are authenticated before invoking the target handler. If
+// disabled is true, it will just invoke the next handler in the chain.
+func WithAuthMiddleware(disabled bool, authn TokenVerifier, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !disabled {
+			cookies := r.Cookies()
+			tokenString, err := httputil.JoinCookies(common.AuthCookieName, cookies)
+			if err != nil {
+				http.Error(w, "Auth cookie not found", http.StatusBadRequest)
+				return
+			}
+			claims, _, err := authn.VerifyToken(tokenString)
+			if err != nil {
+				http.Error(w, "Invalid token", http.StatusUnauthorized)
+				return
+			}
+			ctx := r.Context()
+			// Add claims to the context to inspect for RBAC
+			//nolint:staticcheck
+			ctx = context.WithValue(ctx, "claims", claims)
+			r = r.WithContext(ctx)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // VerifyToken verifies if a token is correct. Tokens can be issued either from us or by an IDP.
 // We choose how to verify based on the issuer.
-func (mgr *SessionManager) VerifyToken(tokenString string) (jwt.Claims, error) {
-	parser := &jwt.Parser{
-		SkipClaimsValidation: true,
-	}
-	var claims jwt.StandardClaims
+func (mgr *SessionManager) VerifyToken(tokenString string) (jwt.Claims, string, error) {
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	claims := jwt.MapClaims{}
 	_, _, err := parser.ParseUnverified(tokenString, &claims)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	switch claims.Issuer {
+	// Get issuer from MapClaims
+	issuer, _ := claims["iss"].(string)
+	switch issuer {
 	case SessionManagerClaimsIssuer:
 		// Argo CD signed token
 		return mgr.Parse(tokenString)
@@ -431,15 +536,39 @@ func (mgr *SessionManager) VerifyToken(tokenString string) (jwt.Claims, error) {
 		// IDP signed token
 		prov, err := mgr.provider()
 		if err != nil {
-			return claims, err
+			return nil, "", err
 		}
-		idToken, err := prov.Verify(claims.Audience, tokenString)
+
+		argoSettings, err := mgr.settingsMgr.GetSettings()
 		if err != nil {
-			return claims, err
+			return nil, "", fmt.Errorf("cannot access settings while verifying the token: %w", err)
 		}
+		if argoSettings == nil {
+			return nil, "", errors.New("settings are not available while verifying the token")
+		}
+
+		idToken, err := prov.Verify(tokenString, argoSettings)
+		// The token verification has failed. If the token has expired, we will
+		// return a dummy claims only containing a value for the issuer, so the
+		// UI can handle expired tokens appropriately.
+		if err != nil {
+			log.Warnf("Failed to verify token: %s", err)
+			tokenExpiredError := &oidc.TokenExpiredError{}
+			if errors.As(err, &tokenExpiredError) {
+				claims = jwt.MapClaims{
+					"iss": "sso",
+				}
+				return claims, "", common.ErrTokenVerification
+			}
+			return nil, "", common.ErrTokenVerification
+		}
+
 		var claims jwt.MapClaims
 		err = idToken.Claims(&claims)
-		return claims, err
+		if err != nil {
+			return nil, "", err
+		}
+		return claims, "", nil
 	}
 }
 
@@ -452,27 +581,34 @@ func (mgr *SessionManager) provider() (oidcutil.Provider, error) {
 		return nil, err
 	}
 	if !settings.IsSSOConfigured() {
-		return nil, fmt.Errorf("SSO is not configured")
+		return nil, errors.New("SSO is not configured")
 	}
 	mgr.prov = oidcutil.NewOIDCProvider(settings.IssuerURL(), mgr.client)
 	return mgr.prov, nil
 }
 
+func (mgr *SessionManager) RevokeToken(ctx context.Context, id string, expiringAt time.Duration) error {
+	return mgr.storage.RevokeToken(ctx, id, expiringAt)
+}
+
 func LoggedIn(ctx context.Context) bool {
-	return Sub(ctx) != ""
+	return GetUserIdentifier(ctx) != "" && ctx.Value(AuthErrorCtxKey) == nil
 }
 
 // Username is a helper to extract a human readable username from a context
 func Username(ctx context.Context) string {
-	mapClaims, ok := mapClaims(ctx)
+	argoClaims, ok := argoClaims(ctx)
 	if !ok {
 		return ""
 	}
-	switch jwtutil.GetField(mapClaims, "iss") {
+	switch argoClaims.Issuer {
 	case SessionManagerClaimsIssuer:
-		return jwtutil.GetField(mapClaims, "sub")
+		return argoClaims.GetUserIdentifier()
 	default:
-		return jwtutil.GetField(mapClaims, "email")
+		if argoClaims.Email != "" {
+			return argoClaims.Email
+		}
+		return argoClaims.GetUserIdentifier()
 	}
 }
 
@@ -481,7 +617,7 @@ func Iss(ctx context.Context) string {
 	if !ok {
 		return ""
 	}
-	return jwtutil.GetField(mapClaims, "iss")
+	return jwtutil.StringField(mapClaims, "iss")
 }
 
 func Iat(ctx context.Context) (time.Time, error) {
@@ -489,24 +625,20 @@ func Iat(ctx context.Context) (time.Time, error) {
 	if !ok {
 		return time.Time{}, errors.New("unable to extract token claims")
 	}
-	iatField, ok := mapClaims["iat"]
-	if !ok {
-		return time.Time{}, errors.New("token does not have iat claim")
-	}
-
-	if iat, ok := iatField.(float64); !ok {
-		return time.Time{}, errors.New("iat token field has unexpected type")
-	} else {
-		return time.Unix(int64(iat), 0), nil
-	}
+	return jwtutil.IssuedAtTime(mapClaims)
 }
 
-func Sub(ctx context.Context) string {
+// GetUserIdentifier returns the user identifier from context, prioritizing federated claims over subject
+func GetUserIdentifier(ctx context.Context) string {
 	mapClaims, ok := mapClaims(ctx)
 	if !ok {
 		return ""
 	}
-	return jwtutil.GetField(mapClaims, "sub")
+	argoClaims, err := claimsutil.MapClaimsToArgoClaims(mapClaims)
+	if err != nil {
+		return ""
+	}
+	return argoClaims.GetUserIdentifier()
 }
 
 func Groups(ctx context.Context, scopes []string) []string {
@@ -527,4 +659,16 @@ func mapClaims(ctx context.Context) (jwt.MapClaims, bool) {
 		return nil, false
 	}
 	return mapClaims, true
+}
+
+func argoClaims(ctx context.Context) (*claimsutil.ArgoClaims, bool) {
+	mapClaims, ok := mapClaims(ctx)
+	if !ok {
+		return nil, false
+	}
+	argoClaims, err := claimsutil.MapClaimsToArgoClaims(mapClaims)
+	if err != nil {
+		return nil, false
+	}
+	return argoClaims, true
 }

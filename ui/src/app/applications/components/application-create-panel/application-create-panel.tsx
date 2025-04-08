@@ -1,3 +1,4 @@
+/* eslint-disable no-prototype-builtins */
 import {AutocompleteField, Checkbox, DataLoader, DropDownMenu, FormField, HelpIcon, Select} from 'argo-ui';
 import * as deepMerge from 'deepmerge';
 import * as React from 'react';
@@ -6,16 +7,19 @@ import {RevisionHelpIcon, YamlEditor} from '../../../shared/components';
 import * as models from '../../../shared/models';
 import {services} from '../../../shared/services';
 import {ApplicationParameters} from '../application-parameters/application-parameters';
-import {ApplicationSyncOptionsField} from '../application-sync-options';
+import {ApplicationRetryOptions} from '../application-retry-options/application-retry-options';
+import {ApplicationSyncOptionsField} from '../application-sync-options/application-sync-options';
+import {RevisionFormField} from '../revision-form-field/revision-form-field';
+import {SetFinalizerOnApplication} from './set-finalizer-on-application';
+import './application-create-panel.scss';
+import {getAppDefaultSource} from '../utils';
+import {debounce} from 'lodash-es';
 
 const jsonMergePatch = require('json-merge-patch');
-
-require('./application-create-panel.scss');
 
 const appTypes = new Array<{field: string; type: models.AppSourceType}>(
     {type: 'Helm', field: 'helm'},
     {type: 'Kustomize', field: 'kustomize'},
-    {type: 'Ksonnet', field: 'ksonnet'},
     {type: 'Directory', field: 'directory'},
     {type: 'Plugin', field: 'plugin'}
 );
@@ -28,15 +32,16 @@ const DEFAULT_APP: Partial<models.Application> = {
     },
     spec: {
         destination: {
-            name: '',
+            name: undefined,
             namespace: '',
-            server: ''
+            server: undefined
         },
         source: {
             path: '',
             repoURL: '',
             targetRevision: 'HEAD'
         },
+        sources: [],
         project: ''
     }
 };
@@ -78,16 +83,17 @@ const AutoSyncFormField = ReactFormField((props: {fieldApi: FieldApi; className:
 });
 
 function normalizeAppSource(app: models.Application, type: string): boolean {
-    const repoType = (app.spec.source.hasOwnProperty('chart') && 'helm') || 'git';
+    const source = getAppDefaultSource(app);
+    const repoType = (source.hasOwnProperty('chart') && 'helm') || 'git';
     if (repoType !== type) {
         if (type === 'git') {
-            app.spec.source.path = app.spec.source.chart;
-            delete app.spec.source.chart;
-            app.spec.source.targetRevision = 'HEAD';
+            source.path = source.chart;
+            delete source.chart;
+            source.targetRevision = 'HEAD';
         } else {
-            app.spec.source.chart = app.spec.source.path;
-            delete app.spec.source.path;
-            app.spec.source.targetRevision = '';
+            source.chart = source.path;
+            delete source.path;
+            source.targetRevision = '';
         }
         return true;
     }
@@ -102,17 +108,77 @@ export const ApplicationCreatePanel = (props: {
 }) => {
     const [yamlMode, setYamlMode] = React.useState(false);
     const [explicitPathType, setExplicitPathType] = React.useState<{path: string; type: models.AppSourceType}>(null);
-    const [destFormat, setDestFormat] = React.useState('URL');
+    const [retry, setRetry] = React.useState(false);
+    const app = deepMerge(DEFAULT_APP, props.app || {});
+    const debouncedOnAppChanged = debounce(props.onAppChanged, 800);
+    const [destinationFieldChanges, setDestinationFieldChanges] = React.useState({destFormat: 'URL', destFormatChanged: null});
+    const comboSwitchedFromPanel = React.useRef(false);
+    let destinationComboValue = destinationFieldChanges.destFormat;
+
+    React.useEffect(() => {
+        comboSwitchedFromPanel.current = false;
+    }, []);
+
+    React.useEffect(() => {
+        return () => {
+            debouncedOnAppChanged.cancel();
+        };
+    }, [debouncedOnAppChanged]);
 
     function normalizeTypeFields(formApi: FormApi, type: models.AppSourceType) {
-        const app = formApi.getFormState().values;
+        const appToNormalize = formApi.getFormState().values;
         for (const item of appTypes) {
             if (item.type !== type) {
-                delete app.spec.source[item.field];
+                delete appToNormalize.spec.source[item.field];
             }
         }
-        formApi.setAllValues(app);
+        formApi.setAllValues(appToNormalize);
     }
+
+    const currentName = app.spec.destination.name;
+    const currentServer = app.spec.destination.server;
+    if (destinationFieldChanges.destFormatChanged !== null) {
+        if (destinationComboValue == 'NAME') {
+            if (currentName === undefined && currentServer !== undefined && comboSwitchedFromPanel.current === false) {
+                destinationComboValue = 'URL';
+            } else {
+                delete app.spec.destination.server;
+                if (currentName === undefined) {
+                    app.spec.destination.name = '';
+                }
+            }
+        } else {
+            if (currentServer === undefined && currentName !== undefined && comboSwitchedFromPanel.current === false) {
+                destinationComboValue = 'NAME';
+            } else {
+                delete app.spec.destination.name;
+                if (currentServer === undefined) {
+                    app.spec.destination.server = '';
+                }
+            }
+        }
+    } else {
+        if (currentName === undefined && currentServer === undefined) {
+            destinationComboValue = destinationFieldChanges.destFormat;
+            app.spec.destination.server = '';
+        } else {
+            if (currentName != undefined) {
+                destinationComboValue = 'NAME';
+            } else {
+                destinationComboValue = 'URL';
+            }
+        }
+    }
+
+    const onCreateApp = (data: models.Application) => {
+        if (destinationComboValue === 'URL') {
+            delete data.spec.destination.name;
+        } else {
+            delete data.spec.destination.server;
+        }
+
+        props.createApp(data);
+    };
 
     return (
         <React.Fragment>
@@ -127,7 +193,6 @@ export const ApplicationCreatePanel = (props: {
                 }>
                 {({projects, clusters, reposInfo}) => {
                     const repos = reposInfo.map(info => info.repo).sort();
-                    const app = deepMerge(DEFAULT_APP, props.app || {});
                     const repoInfo = reposInfo.find(info => info.repo === app.spec.source.repoURL);
                     if (repoInfo) {
                         normalizeAppSource(app, repoInfo.type || 'git');
@@ -149,8 +214,8 @@ export const ApplicationCreatePanel = (props: {
                             )) || (
                                 <Form
                                     validateError={(a: models.Application) => ({
-                                        'metadata.name': !a.metadata.name && 'Application name is required',
-                                        'spec.project': !a.spec.project && 'Project name is required',
+                                        'metadata.name': !a.metadata.name && 'Application Name is required',
+                                        'spec.project': !a.spec.project && 'Project Name is required',
                                         'spec.source.repoURL': !a.spec.source.repoURL && 'Repository URL is required',
                                         'spec.source.targetRevision': !a.spec.source.targetRevision && a.spec.source.hasOwnProperty('chart') && 'Version is required',
                                         'spec.source.path': !a.spec.source.path && !a.spec.source.chart && 'Path is required',
@@ -167,36 +232,72 @@ export const ApplicationCreatePanel = (props: {
                                             'Cluster name is required'
                                     })}
                                     defaultValues={app}
-                                    formDidUpdate={state => props.onAppChanged(state.values as any)}
-                                    onSubmit={props.createApp}
+                                    formDidUpdate={state => debouncedOnAppChanged(state.values as any)}
+                                    onSubmit={onCreateApp}
                                     getApi={props.getFormApi}>
                                     {api => {
                                         const generalPanel = () => (
                                             <div className='white-box'>
                                                 <p>GENERAL</p>
+                                                {/*
+                                                    Need to specify "type='button'" because the default type 'submit'
+                                                    will activate yaml mode whenever enter is pressed while in the panel.
+                                                    This causes problems with some entry fields that require enter to be
+                                                    pressed for the value to be accepted.
+
+                                                    See https://github.com/argoproj/argo-cd/issues/4576
+                                                */}
                                                 {!yamlMode && (
-                                                    <button className='argo-button argo-button--base application-create-panel__yaml-button' onClick={() => setYamlMode(true)}>
+                                                    <button
+                                                        type='button'
+                                                        className='argo-button argo-button--base application-create-panel__yaml-button'
+                                                        onClick={() => setYamlMode(true)}>
                                                         Edit as YAML
                                                     </button>
                                                 )}
                                                 <div className='argo-form-row'>
-                                                    <FormField formApi={api} label='Application Name' field='metadata.name' component={Text} />
+                                                    <FormField
+                                                        formApi={api}
+                                                        label='Application Name'
+                                                        qeId='application-create-field-app-name'
+                                                        field='metadata.name'
+                                                        component={Text}
+                                                    />
                                                 </div>
                                                 <div className='argo-form-row'>
                                                     <FormField
                                                         formApi={api}
-                                                        label='Project'
+                                                        label='Project Name'
+                                                        qeId='application-create-field-project'
                                                         field='spec.project'
                                                         component={AutocompleteField}
-                                                        componentProps={{items: projects}}
+                                                        componentProps={{
+                                                            items: projects,
+                                                            filterSuggestions: true
+                                                        }}
                                                     />
                                                 </div>
                                                 <div className='argo-form-row'>
-                                                    <FormField formApi={api} field='spec.syncPolicy.automated' component={AutoSyncFormField} />
+                                                    <FormField
+                                                        formApi={api}
+                                                        field='spec.syncPolicy.automated'
+                                                        qeId='application-create-field-sync-policy'
+                                                        component={AutoSyncFormField}
+                                                    />
+                                                </div>
+                                                <div className='argo-form-row'>
+                                                    <FormField formApi={api} field='metadata.finalizers' component={SetFinalizerOnApplication} />
                                                 </div>
                                                 <div className='argo-form-row'>
                                                     <label>Sync Options</label>
                                                     <FormField formApi={api} field='spec.syncPolicy.syncOptions' component={ApplicationSyncOptionsField} />
+                                                    <ApplicationRetryOptions
+                                                        formApi={api}
+                                                        field='spec.syncPolicy.retry'
+                                                        retry={retry || (api.getFormState().values.spec.syncPolicy && api.getFormState().values.spec.syncPolicy.retry)}
+                                                        setRetry={setRetry}
+                                                        initValues={api.getFormState().values.spec.syncPolicy ? api.getFormState().values.spec.syncPolicy.retry : null}
+                                                    />
                                                 </div>
                                             </div>
                                         );
@@ -210,9 +311,13 @@ export const ApplicationCreatePanel = (props: {
                                                         <FormField
                                                             formApi={api}
                                                             label='Repository URL'
+                                                            qeId='application-create-field-repository-url'
                                                             field='spec.source.repoURL'
                                                             component={AutocompleteField}
-                                                            componentProps={{items: repos}}
+                                                            componentProps={{
+                                                                items: repos,
+                                                                filterSuggestions: true
+                                                            }}
                                                         />
                                                     </div>
                                                     <div className='columns small-2'>
@@ -228,6 +333,7 @@ export const ApplicationCreatePanel = (props: {
                                                                             {repoType.toUpperCase()} <i className='fa fa-caret-down' />
                                                                         </p>
                                                                     )}
+                                                                    qeId='application-create-dropdown-source-repository'
                                                                     items={['git', 'helm'].map((type: 'git' | 'helm') => ({
                                                                         title: type.toUpperCase(),
                                                                         action: () => {
@@ -246,17 +352,14 @@ export const ApplicationCreatePanel = (props: {
                                                 </div>
                                                 {(repoType === 'git' && (
                                                     <React.Fragment>
-                                                        <div className='argo-form-row'>
-                                                            <FormField formApi={api} label='Revision' field='spec.source.targetRevision' component={Text} />
-                                                            <RevisionHelpIcon type='git' />
-                                                        </div>
+                                                        <RevisionFormField formApi={api} helpIconTop={'2.5em'} repoURL={app.spec.source.repoURL} />
                                                         <div className='argo-form-row'>
                                                             <DataLoader
                                                                 input={{repoURL: app.spec.source.repoURL, revision: app.spec.source.targetRevision}}
                                                                 load={async src =>
                                                                     (src.repoURL &&
                                                                         services.repos
-                                                                            .apps(src.repoURL, src.revision)
+                                                                            .apps(src.repoURL, src.revision, app.metadata.name, app.spec.project)
                                                                             .then(apps => Array.from(new Set(apps.map(item => item.path))).sort())
                                                                             .catch(() => new Array<string>())) ||
                                                                     new Array<string>()
@@ -265,6 +368,7 @@ export const ApplicationCreatePanel = (props: {
                                                                     <FormField
                                                                         formApi={api}
                                                                         label='Path'
+                                                                        qeId='application-create-field-path'
                                                                         field='spec.source.path'
                                                                         component={AutocompleteField}
                                                                         componentProps={{
@@ -305,7 +409,8 @@ export const ApplicationCreatePanel = (props: {
                                                                             field='spec.source.targetRevision'
                                                                             component={AutocompleteField}
                                                                             componentProps={{
-                                                                                items: (selectedChart && selectedChart.versions) || []
+                                                                                items: (selectedChart && selectedChart.versions) || [],
+                                                                                filterSuggestions: true
                                                                             }}
                                                                         />
                                                                         <RevisionHelpIcon type='helm' />
@@ -321,13 +426,17 @@ export const ApplicationCreatePanel = (props: {
                                             <div className='white-box'>
                                                 <p>DESTINATION</p>
                                                 <div className='row argo-form-row'>
-                                                    {(destFormat.toUpperCase() === 'URL' && (
+                                                    {(destinationComboValue.toUpperCase() === 'URL' && (
                                                         <div className='columns small-10'>
                                                             <FormField
                                                                 formApi={api}
                                                                 label='Cluster URL'
+                                                                qeId='application-create-field-cluster-url'
                                                                 field='spec.destination.server'
-                                                                componentProps={{items: clusters.map(cluster => cluster.server)}}
+                                                                componentProps={{
+                                                                    items: clusters.map(cluster => cluster.server),
+                                                                    filterSuggestions: true
+                                                                }}
                                                                 component={AutocompleteField}
                                                             />
                                                         </div>
@@ -336,8 +445,12 @@ export const ApplicationCreatePanel = (props: {
                                                             <FormField
                                                                 formApi={api}
                                                                 label='Cluster Name'
+                                                                qeId='application-create-field-cluster-name'
                                                                 field='spec.destination.name'
-                                                                componentProps={{items: clusters.map(cluster => cluster.name)}}
+                                                                componentProps={{
+                                                                    items: clusters.map(cluster => cluster.name),
+                                                                    filterSuggestions: true
+                                                                }}
                                                                 component={AutocompleteField}
                                                             />
                                                         </div>
@@ -347,21 +460,17 @@ export const ApplicationCreatePanel = (props: {
                                                             <DropDownMenu
                                                                 anchor={() => (
                                                                     <p>
-                                                                        {destFormat} <i className='fa fa-caret-down' />
+                                                                        {destinationComboValue} <i className='fa fa-caret-down' />
                                                                     </p>
                                                                 )}
+                                                                qeId='application-create-dropdown-destination'
                                                                 items={['URL', 'NAME'].map((type: 'URL' | 'NAME') => ({
                                                                     title: type,
                                                                     action: () => {
-                                                                        if (destFormat !== type) {
-                                                                            const updatedApp = api.getFormState().values as models.Application;
-                                                                            if (type === 'URL') {
-                                                                                delete updatedApp.spec.destination.name;
-                                                                            } else {
-                                                                                delete updatedApp.spec.destination.server;
-                                                                            }
-                                                                            api.setAllValues(updatedApp);
-                                                                            setDestFormat(type);
+                                                                        if (destinationComboValue !== type) {
+                                                                            destinationComboValue = type;
+                                                                            comboSwitchedFromPanel.current = true;
+                                                                            setDestinationFieldChanges({destFormat: type, destFormatChanged: 'changed'});
                                                                         }
                                                                     }
                                                                 }))}
@@ -370,7 +479,13 @@ export const ApplicationCreatePanel = (props: {
                                                     </div>
                                                 </div>
                                                 <div className='argo-form-row'>
-                                                    <FormField formApi={api} label='Namespace' field='spec.destination.namespace' component={Text} />
+                                                    <FormField
+                                                        qeId='application-create-field-namespace'
+                                                        formApi={api}
+                                                        label='Namespace'
+                                                        field='spec.destination.namespace'
+                                                        component={Text}
+                                                    />
                                                 </div>
                                             </div>
                                         );
@@ -381,11 +496,12 @@ export const ApplicationCreatePanel = (props: {
                                                     repoURL: app.spec.source.repoURL,
                                                     path: app.spec.source.path,
                                                     chart: app.spec.source.chart,
-                                                    targetRevision: app.spec.source.targetRevision
+                                                    targetRevision: app.spec.source.targetRevision,
+                                                    appName: app.metadata.name
                                                 }}
                                                 load={async src => {
                                                     if (src.repoURL && src.targetRevision && (src.path || src.chart)) {
-                                                        return services.repos.appDetails(src).catch(() => ({
+                                                        return services.repos.appDetails(src, src.appName, app.spec.project, 0, 0).catch(() => ({
                                                             type: 'Directory',
                                                             details: {}
                                                         }));
@@ -410,9 +526,6 @@ export const ApplicationCreatePanel = (props: {
                                                             case 'Kustomize':
                                                                 details = {type, path: details.path, kustomize: {path: ''}};
                                                                 break;
-                                                            case 'Ksonnet':
-                                                                details = {type, path: details.path, ksonnet: {name: '', path: '', environments: {}, parameters: []}};
-                                                                break;
                                                             case 'Plugin':
                                                                 details = {type, path: details.path, plugin: {name: '', env: []}};
                                                                 break;
@@ -430,6 +543,7 @@ export const ApplicationCreatePanel = (props: {
                                                                         {type} <i className='fa fa-caret-down' />
                                                                     </p>
                                                                 )}
+                                                                qeId='application-create-dropdown-source'
                                                                 items={appTypes.map(item => ({
                                                                     title: item.type,
                                                                     action: () => {

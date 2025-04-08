@@ -2,19 +2,24 @@ package session
 
 import (
 	"context"
+	"fmt"
 
-	util "github.com/argoproj/gitops-engine/pkg/utils/io"
+	"github.com/argoproj/argo-cd/v3/util/settings"
+
+	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/argoproj/argo-cd/pkg/apiclient/session"
-	"github.com/argoproj/argo-cd/server/rbacpolicy"
-	sessionmgr "github.com/argoproj/argo-cd/util/session"
+	"github.com/argoproj/argo-cd/v3/pkg/apiclient/session"
+	"github.com/argoproj/argo-cd/v3/server/rbacpolicy"
+	util "github.com/argoproj/argo-cd/v3/util/io"
+	sessionmgr "github.com/argoproj/argo-cd/v3/util/session"
 )
 
 // Server provides a Session service
 type Server struct {
 	mgr                *sessionmgr.SessionManager
+	settingsMgr        *settings.SettingsManager
 	authenticator      Authenticator
 	policyEnf          *rbacpolicy.RBACPolicyEnforcer
 	limitLoginAttempts func() (util.Closer, error)
@@ -25,8 +30,8 @@ type Authenticator interface {
 }
 
 // NewServer returns a new instance of the Session service
-func NewServer(mgr *sessionmgr.SessionManager, authenticator Authenticator, policyEnf *rbacpolicy.RBACPolicyEnforcer, rateLimiter func() (util.Closer, error)) *Server {
-	return &Server{mgr, authenticator, policyEnf, rateLimiter}
+func NewServer(mgr *sessionmgr.SessionManager, settingsMgr *settings.SettingsManager, authenticator Authenticator, policyEnf *rbacpolicy.RBACPolicyEnforcer, rateLimiter func() (util.Closer, error)) *Server {
+	return &Server{mgr, settingsMgr, authenticator, policyEnf, rateLimiter}
 }
 
 // Create generates a JWT token signed by Argo CD intended for web/CLI logins of the admin user
@@ -50,7 +55,18 @@ func (s *Server) Create(_ context.Context, q *session.SessionCreateRequest) (*se
 	if err != nil {
 		return nil, err
 	}
-	jwtToken, err := s.mgr.Create(q.Username, 0, "")
+	uniqueId, err := uuid.NewRandom()
+	if err != nil {
+		return nil, err
+	}
+	argoCDSettings, err := s.settingsMgr.GetSettings()
+	if err != nil {
+		return nil, err
+	}
+	jwtToken, err := s.mgr.Create(
+		fmt.Sprintf("%s:%s", q.Username, settings.AccountCapabilityLogin),
+		int64(argoCDSettings.UserSessionDuration.Seconds()),
+		uniqueId.String())
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +74,7 @@ func (s *Server) Create(_ context.Context, q *session.SessionCreateRequest) (*se
 }
 
 // Delete an authentication cookie from the client.  This makes sense only for the Web client.
-func (s *Server) Delete(ctx context.Context, q *session.SessionDeleteRequest) (*session.SessionResponse, error) {
+func (s *Server) Delete(_ context.Context, _ *session.SessionDeleteRequest) (*session.SessionResponse, error) {
 	return &session.SessionResponse{Token: ""}, nil
 }
 
@@ -66,13 +82,13 @@ func (s *Server) Delete(ctx context.Context, q *session.SessionDeleteRequest) (*
 // Without this function here, ArgoCDServer.authenticate would be invoked and credentials checked.
 // Since this service is generally invoked when the user has _no_ credentials, that would create a
 // chicken-and-egg situation if we didn't place this here to allow traffic to pass through.
-func (s *Server) AuthFuncOverride(ctx context.Context, fullMethodName string) (context.Context, error) {
+func (s *Server) AuthFuncOverride(ctx context.Context, _ string) (context.Context, error) {
 	// this authenticates the user, but ignores any error, so that we have claims populated
 	ctx, _ = s.authenticator.Authenticate(ctx)
 	return ctx, nil
 }
 
-func (s *Server) GetUserInfo(ctx context.Context, q *session.GetUserInfoRequest) (*session.GetUserInfoResponse, error) {
+func (s *Server) GetUserInfo(ctx context.Context, _ *session.GetUserInfoRequest) (*session.GetUserInfoResponse, error) {
 	return &session.GetUserInfoResponse{
 		LoggedIn: sessionmgr.LoggedIn(ctx),
 		Username: sessionmgr.Username(ctx),

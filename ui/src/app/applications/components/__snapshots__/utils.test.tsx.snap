@@ -1,11 +1,12 @@
 // Jest Snapshot v1, https://goo.gl/fbAQLP
 
 exports[`ComparisonStatusIcon.OutOfSync 1`] = `
-Array [
+[
   <i
     className="fa fa-arrow-alt-circle-up"
+    qe-id="utils-sync-status-title"
     style={
-      Object {
+      {
         "color": "#f4c030",
       }
     }
@@ -16,11 +17,12 @@ Array [
 `;
 
 exports[`ComparisonStatusIcon.Synced 1`] = `
-Array [
+[
   <i
     className="fa fa-check-circle"
+    qe-id="utils-sync-status-title"
     style={
-      Object {
+      {
         "color": "#18BE94",
       }
     }
@@ -31,11 +33,12 @@ Array [
 `;
 
 exports[`ComparisonStatusIcon.Unknown 1`] = `
-Array [
+[
   <i
     className="fa fa-circle-notch fa-spin"
+    qe-id="utils-sync-status-title"
     style={
-      Object {
+      {
         "color": "#CCD6DD",
       }
     }
@@ -47,9 +50,10 @@ Array [
 
 exports[`HealthStatusIcon.Degraded 1`] = `
 <i
-  className="fa fa-heart-broken"
+  className="fa fa-heart-broken utils-health-status-icon"
+  qe-id="utils-health-status-title"
   style={
-    Object {
+    {
       "color": "#E96D76",
     }
   }
@@ -59,9 +63,10 @@ exports[`HealthStatusIcon.Degraded 1`] = `
 
 exports[`HealthStatusIcon.Healthy 1`] = `
 <i
-  className="fa fa-heart"
+  className="fa fa-heart utils-health-status-icon"
+  qe-id="utils-health-status-title"
   style={
-    Object {
+    {
       "color": "#18BE94",
     }
   }
@@ -71,10 +76,11 @@ exports[`HealthStatusIcon.Healthy 1`] = `
 
 exports[`HealthStatusIcon.Missing 1`] = `
 <i
-  className="fa fa-question-circle"
+  className="fa fa-ghost utils-health-status-icon"
+  qe-id="utils-health-status-title"
   style={
-    Object {
-      "color": "#CCD6DD",
+    {
+      "color": "#f4c030",
     }
   }
   title="Missing"
@@ -83,9 +89,10 @@ exports[`HealthStatusIcon.Missing 1`] = `
 
 exports[`HealthStatusIcon.Progressing 1`] = `
 <i
-  className="fa fa fa-circle-notch fa-spin"
+  className="fa fa fa-circle-notch fa-spin utils-health-status-icon"
+  qe-id="utils-health-status-title"
   style={
-    Object {
+    {
       "color": "#0DADEA",
     }
   }
@@ -95,10 +102,11 @@ exports[`HealthStatusIcon.Progressing 1`] = `
 
 exports[`HealthStatusIcon.Suspended 1`] = `
 <i
-  className="fa fa-heart"
+  className="fa fa-pause-circle utils-health-status-icon"
+  qe-id="utils-health-status-title"
   style={
-    Object {
-      "color": "#CCD6DD",
+    {
+      "color": "#766f94",
     }
   }
   title="Suspended"
@@ -107,9 +115,10 @@ exports[`HealthStatusIcon.Suspended 1`] = `
 
 exports[`HealthStatusIcon.Unknown 1`] = `
 <i
-  className="fa fa-question-circle"
+  className="fa fa-question-circle utils-health-status-icon"
+  qe-id="utils-health-status-title"
   style={
-    Object {
+    {
       "color": "#CCD6DD",
     }
   }
@@ -118,11 +127,12 @@ exports[`HealthStatusIcon.Unknown 1`] = `
 `;
 
 exports[`OperationState.Deleting 1`] = `
-Array [
+[
   <i
     className="fa fa-circle-notch fa-spin"
+    qe-id="utils-operations-status-title"
     style={
-      Object {
+      {
         "color": "#0DADEA",
       }
     }
@@ -134,11 +144,12 @@ Array [
 `;
 
 exports[`OperationState.Sync OK 1`] = `
-Array [
+[
   <i
     className="fa fa-check-circle"
+    qe-id="utils-operations-status-title"
     style={
-      Object {
+      {
         "color": "#18BE94",
       }
     }
@@ -150,11 +161,12 @@ Array [
 `;
 
 exports[`OperationState.Sync error 1`] = `
-Array [
+[
   <i
     className="fa fa-times-circle"
+    qe-id="utils-operations-status-title"
     style={
-      Object {
+      {
         "color": "#E96D76",
       }
     }
@@ -166,11 +178,12 @@ Array [
 `;
 
 exports[`OperationState.Sync failed 1`] = `
-Array [
+[
   <i
     className="fa fa-times-circle"
+    qe-id="utils-operations-status-title"
     style={
-      Object {
+      {
         "color": "#E96D76",
       }
     }
@@ -182,11 +195,12 @@ Array [
 `;
 
 exports[`OperationState.Syncing 1`] = `
-Array [
+[
   <i
     className="fa fa-circle-notch fa-spin"
+    qe-id="utils-operations-status-title"
     style={
-      Object {
+      {
         "color": "#0DADEA",
       }
     }
@@ -198,11 +212,12 @@ Array [
 `;
 
 exports[`OperationState.Unknown 1`] = `
-Array [
+[
   <i
     className="fa fa-circle-notch fa-spin"
+    qe-id="utils-operations-status-title"
     style={
-      Object {
+      {
         "color": "#0DADEA",
       }
     }
@@ -221,7 +236,7 @@ exports[`ResourceResultIcon.Hook.Error 1`] = `
 <i
   className="fa fa-heart-broken"
   style={
-    Object {
+    {
       "color": "#E96D76",
     }
   }
@@ -232,7 +247,7 @@ exports[`ResourceResultIcon.Hook.Failed 1`] = `
 <i
   className="fa fa-heart-broken"
   style={
-    Object {
+    {
       "color": "#E96D76",
     }
   }
@@ -243,11 +258,11 @@ exports[`ResourceResultIcon.Hook.Running 1`] = `
 <i
   className="fa fa-circle-notch fa-spin"
   style={
-    Object {
+    {
       "color": "#0DADEA",
     }
   }
-  title="Running: my-message;"
+  title="Running: my-message"
 />
 `;
 
@@ -255,7 +270,7 @@ exports[`ResourceResultIcon.Hook.Succeeded 1`] = `
 <i
   className="fa fa-heart"
   style={
-    Object {
+    {
       "color": "#18BE94",
     }
   }
@@ -266,8 +281,8 @@ exports[`ResourceResultIcon.Hook.Terminating 1`] = `
 <i
   className="fa fa-circle-notch fa-spin"
   style={
-    Object {
-      "color": "#0DADEA",
+    {
+      "color": "#DE303D",
     }
   }
 />
@@ -275,9 +290,9 @@ exports[`ResourceResultIcon.Hook.Terminating 1`] = `
 
 exports[`ResourceResultIcon.Pruned 1`] = `
 <i
-  className="fa fa-heart"
+  className="fa fa-trash"
   style={
-    Object {
+    {
       "color": "#CCD6DD",
     }
   }
@@ -288,7 +303,7 @@ exports[`ResourceResultIcon.SyncFailed 1`] = `
 <i
   className="fa fa-heart-broken"
   style={
-    Object {
+    {
       "color": "#E96D76",
     }
   }
@@ -299,7 +314,7 @@ exports[`ResourceResultIcon.Synced 1`] = `
 <i
   className="fa fa-heart"
   style={
-    Object {
+    {
       "color": "#18BE94",
     }
   }

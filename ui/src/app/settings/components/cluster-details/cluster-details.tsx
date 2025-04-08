@@ -2,13 +2,15 @@ import * as classNames from 'classnames';
 import * as moment from 'moment';
 import * as React from 'react';
 import {FieldApi, FormField as ReactFormField, Text} from 'react-form';
-import {RouteComponentProps} from 'react-router-dom';
-import {Observable} from 'rxjs';
+import {RouteComponentProps, Link} from 'react-router-dom';
+import {from, timer} from 'rxjs';
+import {mergeMap} from 'rxjs/operators';
 
 import {FormField, Ticker} from 'argo-ui';
-import {ConnectionStateIcon, DataLoader, EditablePanel, Page, Timestamp} from '../../../shared/components';
+import {ConnectionStateIcon, DataLoader, EditablePanel, Page, Timestamp, MapInputField} from '../../../shared/components';
 import {Cluster} from '../../../shared/models';
 import {services} from '../../../shared/services';
+import {formatClusterQueryParam} from '../../../shared/utils';
 
 function isRefreshRequested(cluster: Cluster): boolean {
     return cluster.info.connectionState.attemptedAt && cluster.refreshRequestedAt && moment(cluster.info.connectionState.attemptedAt).isBefore(moment(cluster.refreshRequestedAt));
@@ -24,12 +26,12 @@ export const ClusterDetails = (props: RouteComponentProps<{server: string}>) => 
     const loaderRef = React.useRef<DataLoader>();
     const [updating, setUpdating] = React.useState(false);
     return (
-        <DataLoader ref={loaderRef} input={server} load={(url: string) => Observable.interval(1000).flatMap(() => Observable.fromPromise(services.clusters.get(url, '')))}>
+        <DataLoader ref={loaderRef} input={server} load={(url: string) => timer(0, 1000).pipe(mergeMap(() => from(services.clusters.get(url, ''))))}>
             {(cluster: Cluster) => (
                 <Page
-                    title={server}
+                    title='Clusters'
                     toolbar={{
-                        breadcrumbs: [{title: 'Settings', path: '/settings'}, {title: 'Cluster', path: '/settings/clusters'}, {title: server}],
+                        breadcrumbs: [{title: 'Settings', path: '/settings'}, {title: 'Clusters', path: '/settings/clusters'}, {title: server}],
                         actionMenu: {
                             items: [
                                 {
@@ -58,7 +60,9 @@ export const ClusterDetails = (props: RouteComponentProps<{server: string}>) => 
                                 const item = await services.clusters.get(updated.server, '');
                                 item.name = updated.name;
                                 item.namespaces = updated.namespaces;
-                                loaderRef.current.setData(await services.clusters.update(item));
+                                item.labels = updated.labels;
+                                item.annotations = updated.annotations;
+                                loaderRef.current.setData(await services.clusters.update(item, 'name', 'namespaces', 'labels', 'annotations'));
                             }}
                             title='GENERAL'
                             items={[
@@ -68,7 +72,10 @@ export const ClusterDetails = (props: RouteComponentProps<{server: string}>) => 
                                 },
                                 {
                                     title: 'CREDENTIALS TYPE',
-                                    view: (cluster.config.awsAuthConfig && `IAM AUTH (cluster name: ${cluster.config.awsAuthConfig.clusterName})`) || 'Token/Basic Auth'
+                                    view:
+                                        (cluster.config.awsAuthConfig && `IAM AUTH (cluster name: ${cluster.config.awsAuthConfig.clusterName})`) ||
+                                        (cluster.config.execProviderConfig && `External provider (command: ${cluster.config.execProviderConfig.command})`) ||
+                                        'Token/Basic Auth'
                                 },
                                 {
                                     title: 'NAME',
@@ -79,6 +86,37 @@ export const ClusterDetails = (props: RouteComponentProps<{server: string}>) => 
                                     title: 'NAMESPACES',
                                     view: ((cluster.namespaces || []).length === 0 && 'All namespaces') || cluster.namespaces.join(', '),
                                     edit: formApi => <FormField formApi={formApi} field='namespaces' component={NamespacesEditor} />
+                                },
+                                {
+                                    title: 'APPLICATIONS',
+                                    view: (
+                                        <div>
+                                            <DataLoader load={() => services.applications.list([])}>
+                                                {apps => (
+                                                    <Link to={`/applications?cluster=${formatClusterQueryParam(cluster)}`}>
+                                                        {
+                                                            apps.items.filter(app => app.spec.destination.name === cluster.name || app.spec.destination.server === cluster.server)
+                                                                .length
+                                                        }
+                                                    </Link>
+                                                )}
+                                            </DataLoader>
+                                        </div>
+                                    )
+                                },
+                                {
+                                    title: 'LABELS',
+                                    view: Object.keys(cluster.labels || [])
+                                        .map(label => `${label}=${cluster.labels[label]}`)
+                                        .join(' '),
+                                    edit: formApi => <FormField formApi={formApi} field='labels' component={MapInputField} />
+                                },
+                                {
+                                    title: 'ANNOTATIONS',
+                                    view: Object.keys(cluster.annotations || [])
+                                        .map(annotation => `${annotation}=${cluster.annotations[annotation]}`)
+                                        .join(' '),
+                                    edit: formApi => <FormField formApi={formApi} field='annotations' component={MapInputField} />
                                 }
                             ]}
                         />
@@ -107,7 +145,9 @@ export const ClusterDetails = (props: RouteComponentProps<{server: string}>) => 
                                                 if (!cluster.info.connectionState.attemptedAt) {
                                                     return <span>Never (next refresh in few seconds)</span>;
                                                 }
-                                                const secondsBeforeRefresh = Math.round(Math.max(10 - now.diff(moment(cluster.info.connectionState.attemptedAt)) / 1000, 1));
+                                                const secondsBeforeRefresh = Math.round(
+                                                    Math.max(10 - moment(now).diff(moment(cluster.info.connectionState.attemptedAt)) / 1000, 1)
+                                                );
                                                 return (
                                                     <React.Fragment>
                                                         <Timestamp date={cluster.info.connectionState.attemptedAt} /> (next refresh in {secondsBeforeRefresh} seconds)

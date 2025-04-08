@@ -6,11 +6,11 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	. "github.com/argoproj/argo-cd/pkg/apis/application/v1alpha1"
-	cacheutil "github.com/argoproj/argo-cd/util/cache"
-	appstatecache "github.com/argoproj/argo-cd/util/cache/appstate"
-	"github.com/argoproj/argo-cd/util/oidc"
+	. "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	cacheutil "github.com/argoproj/argo-cd/v3/util/cache"
+	appstatecache "github.com/argoproj/argo-cd/v3/util/cache/appstate"
 )
 
 type fixtures struct {
@@ -32,40 +32,30 @@ func newFixtures() *fixtures {
 func TestCache_GetRepoConnectionState(t *testing.T) {
 	cache := newFixtures().Cache
 	// cache miss
-	_, err := cache.GetRepoConnectionState("my-repo")
+	_, err := cache.GetRepoConnectionState("my-repo", "")
 	assert.Equal(t, ErrCacheMiss, err)
 	// populate cache
-	err = cache.SetRepoConnectionState("my-repo", &ConnectionState{Status: "my-state"})
-	assert.NoError(t, err)
+	err = cache.SetRepoConnectionState("my-repo", "", &ConnectionState{Status: "my-state"})
+	require.NoError(t, err)
 	// cache miss
-	_, err = cache.GetRepoConnectionState("other-repo")
+	_, err = cache.GetRepoConnectionState("my-repo", "some-project")
 	assert.Equal(t, ErrCacheMiss, err)
+	// populate cache
+	err = cache.SetRepoConnectionState("my-repo", "some-project", &ConnectionState{Status: "my-project-state"})
+	require.NoError(t, err)
 	// cache hit
-	value, err := cache.GetRepoConnectionState("my-repo")
-	assert.NoError(t, err)
+	value, err := cache.GetRepoConnectionState("my-repo", "")
+	require.NoError(t, err)
 	assert.Equal(t, ConnectionState{Status: "my-state"}, value)
-}
-
-func TestCache_GetOIDCState(t *testing.T) {
-	cache := newFixtures().Cache
-	// cache miss
-	_, err := cache.GetOIDCState("my-key")
-	assert.Equal(t, ErrCacheMiss, err)
-	// populate cache
-	err = cache.SetOIDCState("my-key", &oidc.OIDCState{ReturnURL: "my-return-url"})
-	assert.NoError(t, err)
-	//cache miss
-	_, err = cache.GetOIDCState("other-key")
-	assert.Equal(t, ErrCacheMiss, err)
 	// cache hit
-	value, err := cache.GetOIDCState("my-key")
-	assert.NoError(t, err)
-	assert.Equal(t, &oidc.OIDCState{ReturnURL: "my-return-url"}, value)
+	value, err = cache.GetRepoConnectionState("my-repo", "some-project")
+	require.NoError(t, err)
+	assert.Equal(t, ConnectionState{Status: "my-project-state"}, value)
 }
 
 func TestAddCacheFlagsToCmd(t *testing.T) {
 	cache, err := AddCacheFlagsToCmd(&cobra.Command{})()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, 1*time.Hour, cache.connectionStatusCacheExpiration)
 	assert.Equal(t, 3*time.Minute, cache.oidcCacheExpiration)
 }

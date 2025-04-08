@@ -17,8 +17,8 @@ allowed public key.
 By default, signature verification is enabled but not enforced. If you wish to
 completely disable the GnuPG functionality in ArgoCD, you have to set the
 environment variable `ARGOCD_GPG_ENABLED` to `"false"` in the pod templates of
-the `argocd-server`, `argocd-repo-server` and `argocd-application-controller`
-deployment manifests.
+the `argocd-server`, `argocd-repo-server`, `argocd-application-controller` and 
+`argocd-applicationset-controller` deployment manifests.
 
 Verification of GnuPG signatures is only supported with Git repositories. It is
 not possible using Helm repositories.
@@ -28,6 +28,11 @@ not possible using Helm repositories.
     is imported, ArgoCD will trust it. ArgoCD does not support more complex
     trust models, and it is not necessary (nor possible) to sign the public keys
     you are going to import into ArgoCD.
+
+
+!!!note Limitations
+  Signature verification is not supported for the templated `project` field when 
+  using the Git generator.
 
 ## Signature verification targets
 
@@ -59,6 +64,29 @@ this project.
 !!!warning
     If signature verification is enforced, you will not be able to sync from
     local sources (i.e. `argocd app sync --local`) anymore.
+
+## RBAC rules for managing GnuPG keys
+
+The appropriate resource notation for Argo CD's RBAC implementation to allow
+the managing of GnuPG keys is `gpgkeys`.
+
+To allow listing of keys for a role named `role:myrole`, use:
+
+```
+p, role:myrole, gpgkeys, get, *, allow
+```
+
+To allow adding keys for a role named `role:myrole`, use:
+
+```
+p, role:myrole, gpgkeys, create, *, allow
+```
+
+And finally, to allow deletion of keys for a role named `role:myrole`, use:
+
+```
+p, role:myrole, gpgkeys, delete, *, allow
+```
 
 ## Importing GnuPG public keys
 
@@ -172,7 +200,7 @@ argocd proj add-signature-key myproj 4AEE18F83AFDEB23
 
 #### Removing a key ID from the list of allowed keys
 
-Similarily, you can remove a key ID from the list of allowed GnuPG keys for a
+Similarly, you can remove a key ID from the list of allowed GnuPG keys for a
 project using the `argocd proj remove-signature-key` command, i.e. to remove
 the key added above from project `myproj`, use the command:
 
@@ -187,14 +215,14 @@ output of the `argocd proj get` command, i.e for a project named `gpg`:
 
 ```bash
 $ argocd proj get gpg
-Name:                             gpg
-Description:                      GnuPG verification
-Destinations:                     *,*
-Repositories:                     *
-Whitelisted Cluster Resources:    */*
-Blacklisted Namespaced Resources: <none>
-Signature keys:                   4AEE18F83AFDEB23, 07E34825A909B250
-Orphaned Resources:               disabled
+Name:                        gpg
+Description:                 GnuPG verification
+Destinations:                *,*
+Repositories:                *
+Allowed Cluster Resources:   */*
+Denied Namespaced Resources: <none>
+Signature keys:              4AEE18F83AFDEB23, 07E34825A909B250
+Orphaned Resources:          disabled
 ```
 
 #### Override list of key IDs
@@ -259,8 +287,8 @@ spec:
 
 The GnuPG feature can be completely disabled if desired. In order to disable it,
 set the environment variable `ARGOCD_GPG_ENABLED` to `false` for the pod
-templates of the `argocd-server`, `argocd-repo-server` and
- `argocd-application-controller` deployments.
+templates of the `argocd-server`, `argocd-repo-server`, `argocd-application-controller`
+and `argocd-applicationset-controller` deployments.
 
 After the pods have been restarted, the GnuPG feature is disabled.
 

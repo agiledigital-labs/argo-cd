@@ -6,7 +6,7 @@ package settings
 // reasons, reducing connections and load to the K8s API servers of managed clusters.
 var coreExcludedResources = []FilteredResource{
 	{APIGroups: []string{"events.k8s.io", "metrics.k8s.io"}},
-	{APIGroups: []string{""}, Kinds: []string{"Event", "Node"}},
+	{APIGroups: []string{""}, Kinds: []string{"Event"}},
 	{APIGroups: []string{"coordination.k8s.io"}, Kinds: []string{"Lease"}},
 }
 
@@ -22,7 +22,6 @@ func (rf *ResourcesFilter) getExcludedResources() []FilteredResource {
 }
 
 func (rf *ResourcesFilter) checkResourcePresence(apiGroup, kind, cluster string, filteredResources []FilteredResource) bool {
-
 	for _, includedResource := range filteredResources {
 		if includedResource.Match(apiGroup, kind, cluster) {
 			return true
@@ -62,7 +61,6 @@ func (rf *ResourcesFilter) isExcludedResource(apiGroup, kind, cluster string) bo
 // +-------------+-------------+-------------+
 // |   Present   |   Present   | Not Allowed |
 // +-------------+-------------+-------------+
-//
 func (rf *ResourcesFilter) IsExcludedResource(apiGroup, kind, cluster string) bool {
 	// if excluded, do not allow
 	if rf.isExcludedResource(apiGroup, kind, cluster) {

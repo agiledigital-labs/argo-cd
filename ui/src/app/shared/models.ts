@@ -35,6 +35,17 @@ export interface SyncOperation {
     resources?: SyncOperationResource[];
 }
 
+export interface RetryBackoff {
+    duration: string;
+    maxDuration: string;
+    factor: number;
+}
+
+export interface RetryStrategy {
+    limit: number;
+    backoff: RetryBackoff;
+}
+
 export interface RollbackOperation {
     id: number;
     prune: boolean;
@@ -83,9 +94,16 @@ export interface RevisionMetadata {
     signatureInfo?: string;
 }
 
+export interface ChartDetails {
+    description?: string;
+    maintainers?: string[];
+    home?: string;
+}
+
 export interface SyncOperationResult {
     resources: ResourceResult[];
     revision: string;
+    revisions: string[];
 }
 
 export type ResultCode = 'Synced' | 'SyncFailed' | 'Pruned' | 'PruneSkipped';
@@ -109,7 +127,16 @@ export interface ResourceResult {
     hookPhase: OperationPhase;
 }
 
+export type SyncResourceResult = ResourceResult & {
+    health?: HealthStatus;
+    syncWave?: number;
+};
+
 export const AnnotationRefreshKey = 'argocd.argoproj.io/refresh';
+export const AnnotationHookKey = 'argocd.argoproj.io/hook';
+export const AnnotationSyncWaveKey = 'argocd.argoproj.io/sync-wave';
+export const AnnotationDefaultView = 'pref.argocd.argoproj.io/default-view';
+export const AnnotationDefaultPodSort = 'pref.argocd.argoproj.io/default-pod-sort';
 
 export interface Application {
     apiVersion?: string;
@@ -118,9 +145,10 @@ export interface Application {
     spec: ApplicationSpec;
     status: ApplicationStatus;
     operation?: Operation;
+    isAppOfAppsPattern?: boolean;
 }
 
-type WatchType = 'ADDED' | 'MODIFIED' | 'DELETED' | 'ERROR';
+export type WatchType = 'ADDED' | 'MODIFIED' | 'DELETED' | 'ERROR';
 
 export interface ApplicationWatchEvent {
     type: WatchType;
@@ -135,17 +163,23 @@ export interface ComponentParameter {
 
 export interface ApplicationDestination {
     /**
-     * Server overrides the environment server value in the ksonnet app.yaml
+     * Server address of the destination cluster
      */
     server: string;
     /**
-     * Namespace overrides the environment namespace value in the ksonnet app.yaml
+     * Namespace of the destination cluster
      */
     namespace: string;
     /**
      * Name of the destination cluster which can be used instead of server (url) field
      */
     name: string;
+}
+
+export interface ApplicationDestinationServiceAccount {
+    server: string;
+    namespace: string;
+    defaultServiceAccount: string;
 }
 
 export interface OrphanedResource {
@@ -172,16 +206,40 @@ export interface ApplicationSource {
 
     kustomize?: ApplicationSourceKustomize;
 
-    ksonnet?: ApplicationSourceKsonnet;
-
     plugin?: ApplicationSourcePlugin;
 
     directory?: ApplicationSourceDirectory;
+
+    ref?: string;
+
+    name?: string;
+}
+
+export interface SourceHydrator {
+    drySource: DrySource;
+    syncSource: SyncSource;
+    hydrateTo?: HydrateTo;
+}
+
+export interface DrySource {
+    repoURL: string;
+    targetRevision: string;
+    path: string;
+}
+
+export interface SyncSource {
+    targetBranch: string;
+    path: string;
+}
+
+export interface HydrateTo {
+    targetBranch: string;
 }
 
 export interface ApplicationSourceHelm {
     valueFiles: string[];
     values?: string;
+    valuesObject?: any;
     parameters: HelmParameter[];
     fileParameters: HelmFileParameter[];
 }
@@ -191,13 +249,8 @@ export interface ApplicationSourceKustomize {
     nameSuffix: string;
     images: string[];
     version: string;
+    namespace: string;
 }
-
-export interface ApplicationSourceKsonnet {
-    environment: string;
-    parameters: KsonnetParameter[];
-}
-
 export interface EnvEntry {
     name: string;
     value: string;
@@ -206,6 +259,14 @@ export interface EnvEntry {
 export interface ApplicationSourcePlugin {
     name: string;
     env: EnvEntry[];
+    parameters?: Parameter[];
+}
+
+export interface Parameter {
+    name: string;
+    string?: string;
+    array?: string[];
+    map?: Map<string, string>;
 }
 
 export interface JsonnetVar {
@@ -222,6 +283,8 @@ interface ApplicationSourceJsonnet {
 export interface ApplicationSourceDirectory {
     recurse: boolean;
     jsonnet?: ApplicationSourceJsonnet;
+    include?: string;
+    exclude?: string;
 }
 
 export interface Automated {
@@ -232,6 +295,7 @@ export interface Automated {
 export interface SyncPolicy {
     automated?: Automated;
     syncOptions?: string[];
+    retry?: RetryStrategy;
 }
 
 export interface Info {
@@ -242,10 +306,22 @@ export interface Info {
 export interface ApplicationSpec {
     project: string;
     source: ApplicationSource;
+    sources: ApplicationSource[];
+    sourceHydrator?: SourceHydrator;
     destination: ApplicationDestination;
     syncPolicy?: SyncPolicy;
+    ignoreDifferences?: ResourceIgnoreDifferences[];
     info?: Info[];
     revisionHistoryLimit?: number;
+}
+
+export interface ResourceIgnoreDifferences {
+    group: string;
+    kind: string;
+    name: string;
+    namespace: string;
+    jsonPointers: string[];
+    jqPathExpressions: string[];
 }
 
 /**
@@ -255,8 +331,11 @@ export interface RevisionHistory {
     id: number;
     revision: string;
     source: ApplicationSource;
+    revisions: string[];
+    sources: ApplicationSource[];
     deployStartedAt: models.Time;
     deployedAt: models.Time;
+    initiatedBy: OperationInitiator;
 }
 
 export type SyncStatusCode = 'Unknown' | 'Synced' | 'OutOfSync';
@@ -270,12 +349,12 @@ export const SyncStatuses: {[key: string]: SyncStatusCode} = {
 export type HealthStatusCode = 'Unknown' | 'Progressing' | 'Healthy' | 'Suspended' | 'Degraded' | 'Missing';
 
 export const HealthStatuses: {[key: string]: HealthStatusCode} = {
-    Unknown: 'Unknown',
     Progressing: 'Progressing',
     Suspended: 'Suspended',
     Healthy: 'Healthy',
     Degraded: 'Degraded',
-    Missing: 'Missing'
+    Missing: 'Missing',
+    Unknown: 'Unknown'
 };
 
 export interface HealthStatus {
@@ -285,6 +364,10 @@ export interface HealthStatus {
 
 export type State = models.TypeMeta & {metadata: models.ObjectMeta} & {status: any; spec: any};
 
+export type ReadinessGate = {
+    conditionType: string;
+};
+
 export interface ResourceStatus {
     group: string;
     version: string;
@@ -293,8 +376,12 @@ export interface ResourceStatus {
     name: string;
     status: SyncStatusCode;
     health: HealthStatus;
+    createdAt?: models.Time;
     hook?: boolean;
     requiresPruning?: boolean;
+    requiresDeletionConfirmation?: boolean;
+    syncWave?: number;
+    orphaned?: boolean;
 }
 
 export interface ResourceRef {
@@ -319,9 +406,14 @@ export interface LoadBalancerIngress {
     ip: string;
 }
 
+export interface InfoItem {
+    name: string;
+    value: string;
+}
+
 export interface ResourceNode extends ResourceRef {
     parentRefs: ResourceRef[];
-    info: {name: string; value: string}[];
+    info: InfoItem[];
     networkingInfo?: ResourceNetworkingInfo;
     images?: string[];
     resourceVersion: string;
@@ -331,6 +423,7 @@ export interface ResourceNode extends ResourceRef {
 export interface ApplicationTree {
     nodes: ResourceNode[];
     orphanedNodes: ResourceNode[];
+    hosts: Node[];
 }
 
 export interface ResourceID {
@@ -352,6 +445,7 @@ export interface SyncStatus {
     comparedTo: ApplicationSource;
     status: SyncStatusCode;
     revision: string;
+    revisions: string[];
 }
 
 export interface ApplicationCondition {
@@ -374,7 +468,37 @@ export interface ApplicationStatus {
     health: HealthStatus;
     operationState?: OperationState;
     summary?: ApplicationSummary;
+    sourceHydrator?: SourceHydratorStatus;
 }
+
+export interface SourceHydratorStatus {
+    lastSuccessfulOperation?: SuccessfulHydrateOperation;
+    currentOperation?: HydrateOperation;
+}
+
+export interface HydrateOperation {
+    startedAt: models.Time;
+    finishedAt?: models.Time;
+    phase: HydrateOperationPhase;
+    message: string;
+    drySHA: string;
+    hydratedSHA: string;
+    sourceHydrator: SourceHydrator;
+}
+
+export interface SuccessfulHydrateOperation {
+    drySHA: string;
+    hydratedSHA: string;
+    sourceHydrator: SourceHydrator;
+}
+
+export type HydrateOperationPhase = 'Hydrating' | 'Failed' | 'Hydrated';
+
+export const HydrateOperationPhases = {
+    Hydrating: 'Hydrating' as OperationPhase,
+    Failed: 'Failed' as OperationPhase,
+    Hydrated: 'Hydrated' as OperationPhase
+};
 
 export interface JwtTokens {
     items: JwtToken[];
@@ -386,6 +510,11 @@ export interface AppProjectStatus {
 export interface LogEntry {
     content: string;
     timeStamp: models.Time;
+    // first field is inferred on the fly and indicats first log line received from backend
+    first?: boolean;
+    last: boolean;
+    timeStampStr: string;
+    podName: string;
 }
 
 // describes plugin settings
@@ -396,6 +525,7 @@ export interface Plugin {
 export interface AuthSettings {
     url: string;
     statusBadgeEnabled: boolean;
+    statusBadgeRootUrl: string;
     googleAnalytics: {
         trackingID: string;
         anonymizeUsers: boolean;
@@ -408,15 +538,26 @@ export interface AuthSettings {
     };
     oidcConfig: {
         name: string;
+        issuer: string;
+        clientID: string;
+        scopes: string[];
+        enablePKCEAuthentication: boolean;
     };
     help: {
         chatUrl: string;
         chatText: string;
+        binaryUrls: Record<string, string>;
     };
-    plugins: Plugin[];
     userLoginsDisabled: boolean;
     kustomizeVersions: string[];
     uiCssURL: string;
+    uiBannerContent: string;
+    uiBannerURL: string;
+    uiBannerPermanent: boolean;
+    uiBannerPosition: string;
+    execEnabled: boolean;
+    appsInAnyNamespaceEnabled: boolean;
+    hydratorEnabled: boolean;
 }
 
 export interface UserInfo {
@@ -455,6 +596,20 @@ export interface Repository {
     type?: string;
     name?: string;
     connectionState: ConnectionState;
+    project?: string;
+    username?: string;
+    password?: string;
+    bearerToken?: string;
+    tlsClientCertData?: string;
+    tlsClientCertKey?: string;
+    proxy?: string;
+    noProxy?: string;
+    insecure?: boolean;
+    enableLfs?: boolean;
+    githubAppId?: string;
+    forceHttpBasicAuth?: boolean;
+    enableOCI: boolean;
+    useAzureWorkloadIdentity: boolean;
 }
 
 export interface RepositoryList extends ItemsList<Repository> {}
@@ -462,6 +617,7 @@ export interface RepositoryList extends ItemsList<Repository> {}
 export interface RepoCreds {
     url: string;
     username?: string;
+    bearerToken?: string;
 }
 
 export interface RepoCredsList extends ItemsList<RepoCreds> {}
@@ -475,6 +631,9 @@ export interface Cluster {
         awsAuthConfig?: {
             clusterName: string;
         };
+        execProviderConfig?: {
+            command: string;
+        };
     };
     info?: {
         applicationsCount: number;
@@ -482,6 +641,8 @@ export interface Cluster {
         connectionState: ConnectionState;
         cacheInfo: ClusterCacheInfo;
     };
+    annotations?: {[name: string]: string};
+    labels?: {[name: string]: string};
 }
 
 export interface ClusterCacheInfo {
@@ -492,40 +653,25 @@ export interface ClusterCacheInfo {
 
 export interface ClusterList extends ItemsList<Cluster> {}
 
-export interface KsonnetEnvironment {
-    k8sVersion: string;
-    path: string;
-    destination: {server: string; namespace: string};
-}
-
-export interface KsonnetParameter {
-    component: string;
-    name: string;
-    value: string;
-}
-
-export interface KsonnetAppSpec {
-    name: string;
-    path: string;
-    environments: {[key: string]: KsonnetEnvironment};
-    parameters: KsonnetParameter[];
-}
-
 export interface HelmChart {
     name: string;
     versions: string[];
 }
 
-export type AppSourceType = 'Helm' | 'Kustomize' | 'Ksonnet' | 'Directory' | 'Plugin';
+export type AppSourceType = 'Helm' | 'Kustomize' | 'Directory' | 'Plugin';
 
 export interface RepoAppDetails {
     type: AppSourceType;
     path: string;
-    ksonnet?: KsonnetAppSpec;
     helm?: HelmAppSpec;
     kustomize?: KustomizeAppSpec;
     plugin?: PluginAppSpec;
     directory?: {};
+}
+
+export interface RefsInfo {
+    branches: string[];
+    tags: string[];
 }
 
 export interface AppInfo {
@@ -555,11 +701,25 @@ export interface HelmAppSpec {
 export interface KustomizeAppSpec {
     path: string;
     images?: string[];
+    namespace?: string;
 }
 
 export interface PluginAppSpec {
     name: string;
     env: EnvEntry[];
+    parametersAnnouncement?: ParameterAnnouncement[];
+}
+
+export interface ParameterAnnouncement {
+    name?: string;
+    title?: string;
+    tooltip?: string;
+    required?: boolean;
+    itemType?: string;
+    collectionType?: string;
+    string?: string;
+    array?: string[];
+    map?: Map<string, string>;
 }
 
 export interface ObjectReference {
@@ -629,7 +789,9 @@ export interface ProjectSignatureKey {
 
 export interface ProjectSpec {
     sourceRepos: string[];
+    sourceNamespaces: string[];
     destinations: ApplicationDestination[];
+    destinationServiceAccounts: ApplicationDestinationServiceAccount[];
     description: string;
     roles: ProjectRole[];
     clusterResourceWhitelist: GroupKind[];
@@ -651,6 +813,8 @@ export interface SyncWindow {
     namespaces: string[];
     clusters: string[];
     manualSync: boolean;
+    timeZone: string;
+    andOperator: boolean;
 }
 
 export interface Project {
@@ -659,6 +823,13 @@ export interface Project {
     metadata: models.ObjectMeta;
     spec: ProjectSpec;
     status: AppProjectStatus;
+}
+
+export interface DetailedProjectsResponse {
+    project: Project;
+    globalProjects: Project[];
+    repositories: Repository[];
+    clusters: Cluster[];
 }
 
 export type ProjectList = ItemsList<Project>;
@@ -683,6 +854,8 @@ export interface ResourceAction {
     name: string;
     params: ResourceActionParam[];
     disabled: boolean;
+    iconClass: string;
+    displayName: string;
 }
 
 export interface SyncWindowsState {
@@ -697,6 +870,14 @@ export interface ApplicationSyncWindowState {
 
 export interface VersionMessage {
     Version: string;
+    BuildDate: string;
+    GoVersion: string;
+    Compiler: string;
+    Platform: string;
+    KustomizeVersion: string;
+    HelmVersion: string;
+    KubectlVersion: string;
+    JsonnetVersion: string;
 }
 
 export interface Token {
@@ -725,7 +906,7 @@ export interface GnuPGPublicKeyList extends ItemsList<GnuPGPublicKey> {}
 // https://kubernetes.io/docs/reference/kubectl/overview/#resource-types
 
 export const ResourceKinds = [
-    'ANY',
+    '*',
     'Binding',
     'ComponentStatus',
     'ConfigMap',
@@ -797,3 +978,73 @@ export const Groups = [
     'stable.example.com',
     'storage.k8s.io'
 ];
+
+export interface HostResourceInfo {
+    resourceName: ResourceName;
+    requestedByApp: number;
+    requestedByNeighbors: number;
+    capacity: number;
+}
+
+export interface Node {
+    name: string;
+    systemInfo: NodeSystemInfo;
+    resourcesInfo: HostResourceInfo[];
+}
+
+export interface NodeSystemInfo {
+    architecture: string;
+    operatingSystem: string;
+    kernelVersion: string;
+}
+
+export enum ResourceName {
+    ResourceCPU = 'cpu',
+    ResourceMemory = 'memory',
+    ResourceStorage = 'storage'
+}
+
+export interface Pod extends ResourceNode {
+    fullName: string;
+    metadata: models.ObjectMeta;
+    spec: PodSpec;
+    health: HealthStatusCode;
+}
+
+export interface PodSpec {
+    nodeName: string;
+}
+
+export enum PodPhase {
+    PodPending = 'Pending',
+    PodRunning = 'Running',
+    PodSucceeded = 'Succeeded',
+    PodFailed = 'Failed',
+    PodUnknown = 'Unknown'
+}
+
+export interface NotificationChunk {
+    name: string;
+}
+
+export interface LinkInfo {
+    title: string;
+    url: string;
+    description?: string;
+    iconClass?: string;
+}
+
+export interface LinksResponse {
+    items: LinkInfo[];
+}
+
+export interface UserMessages {
+    appName: string;
+    msgKey: string;
+    display: boolean;
+    condition?: HealthStatusCode;
+    duration?: number;
+    animation?: string;
+}
+
+export const AppDeletionConfirmedAnnotation = 'argocd.argoproj.io/deletion-approved';

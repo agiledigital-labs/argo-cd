@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"testing"
 
-	"github.com/argoproj/gitops-engine/pkg/utils/errors"
+	"github.com/stretchr/testify/require"
 )
 
 type AddBinDirToPath struct {
@@ -16,12 +17,12 @@ func (h AddBinDirToPath) Close() {
 	_ = os.Setenv("PATH", h.originalPath)
 }
 
-// add the hack path which has the git-ask-pass.sh shell script
-func NewBinDirToPath() AddBinDirToPath {
+// add the hack path which has the argocd binary
+func NewBinDirToPath(t *testing.T) AddBinDirToPath {
+	t.Helper()
 	originalPath := os.Getenv("PATH")
-	binDir, err := filepath.Abs("../../hack")
-	errors.CheckError(err)
-	err = os.Setenv("PATH", fmt.Sprintf("%s:%s", originalPath, binDir))
-	errors.CheckError(err)
+	binDir, err := filepath.Abs("../../dist")
+	require.NoError(t, err)
+	t.Setenv("PATH", fmt.Sprintf("%s:%s", originalPath, binDir))
 	return AddBinDirToPath{originalPath}
 }

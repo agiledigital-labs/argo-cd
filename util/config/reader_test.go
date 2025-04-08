@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestUnmarshalLocalFile(t *testing.T) {
@@ -21,7 +21,7 @@ func TestUnmarshalLocalFile(t *testing.T) {
 	)
 	sentinel := fmt.Sprintf("---\nfield1: %q\nfield2: %d", field1, field2)
 
-	file, err := ioutil.TempFile(os.TempDir(), "")
+	file, err := os.CreateTemp(os.TempDir(), "")
 	if err != nil {
 		panic(err)
 	}
@@ -37,9 +37,26 @@ func TestUnmarshalLocalFile(t *testing.T) {
 		Field2 int
 	}
 	err = UnmarshalLocalFile(file.Name(), &testStruct)
-	if err != nil {
-		t.Errorf("Could not unmarshal test data: %s", err)
+	require.NoError(t, err, "Could not unmarshal test data")
+
+	if testStruct.Field1 != field1 || testStruct.Field2 != field2 {
+		t.Errorf("Test data did not match! Expected {%s %d} but got: %v", field1, field2, testStruct)
 	}
+}
+
+func TestUnmarshal(t *testing.T) {
+	const (
+		field1 = "Hello, world!"
+		field2 = 42
+	)
+	sentinel := fmt.Sprintf("---\nfield1: %q\nfield2: %d", field1, field2)
+
+	var testStruct struct {
+		Field1 string
+		Field2 int
+	}
+	err := Unmarshal([]byte(sentinel), &testStruct)
+	require.NoError(t, err, "Could not unmarshal test data")
 
 	if testStruct.Field1 != field1 || testStruct.Field2 != field2 {
 		t.Errorf("Test data did not match! Expected {%s %d} but got: %v", field1, field2, testStruct)
@@ -63,7 +80,7 @@ func TestUnmarshalRemoteFile(t *testing.T) {
 		// send back the address so that it can be used
 		c <- listener.Addr().String()
 
-		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 			// return the sentinel text at root URL
 			fmt.Fprint(w, sentinel)
 		})
@@ -80,18 +97,14 @@ func TestUnmarshalRemoteFile(t *testing.T) {
 	t.Logf("Listening at address: %s", address)
 
 	data, err := ReadRemoteFile("http://" + address)
-	if string(data) != sentinel {
-		t.Errorf("Test data did not match (err = %v)! Expected %q and received %q", err, sentinel, string(data))
-	}
+	assert.Equal(t, string(data), sentinel, "Test data did not match (err = %v)! Expected %q and received %q", err, sentinel, string(data))
 
 	var testStruct struct {
 		Field1 string
 		Field2 int
 	}
 	err = UnmarshalRemoteFile("http://"+address, &testStruct)
-	if err != nil {
-		t.Errorf("Could not unmarshal test data: %s", err)
-	}
+	require.NoError(t, err, "Could not unmarshal test data")
 
 	if testStruct.Field1 != field1 || testStruct.Field2 != field2 {
 		t.Errorf("Test data did not match! Expected {%s %d} but got: %v", field1, field2, testStruct)
@@ -105,9 +118,9 @@ func TestUnmarshalReader(t *testing.T) {
 	value := "test-reader"
 	instance := testStruct{value}
 	data, err := json.Marshal(instance)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	var reader io.Reader = bytes.NewReader(data)
 	err = UnmarshalReader(reader, &instance)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Equal(t, value, instance.Value)
 }

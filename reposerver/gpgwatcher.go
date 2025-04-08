@@ -1,6 +1,7 @@
 package reposerver
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"time"
@@ -8,8 +9,10 @@ import (
 	"github.com/fsnotify/fsnotify"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/argoproj/argo-cd/util/gpg"
+	"github.com/argoproj/argo-cd/v3/util/gpg"
 )
+
+const maxRecreateRetries = 5
 
 // StartGPGWatcher watches a given directory for creation and deletion of files and syncs the GPG keyring
 func StartGPGWatcher(sourcePath string) error {
@@ -17,9 +20,13 @@ func StartGPGWatcher(sourcePath string) error {
 	forceSync := false
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create fsnotify Watcher: %w", err)
 	}
-	defer watcher.Close()
+	defer func(watcher *fsnotify.Watcher) {
+		if err = watcher.Close(); err != nil {
+			log.Errorf("Error closing watcher: %v", err)
+		}
+	}(watcher)
 
 	done := make(chan bool)
 	go func() {
@@ -29,15 +36,27 @@ func StartGPGWatcher(sourcePath string) error {
 				if !ok {
 					return
 				}
-				if event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Remove == fsnotify.Remove {
+				if event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) {
 					// In case our watched path is re-created (i.e. during e2e tests), we need to watch again
-					if event.Name == sourcePath && event.Op&fsnotify.Remove == fsnotify.Remove {
+					// For more robustness, we retry re-creating the watcher up to maxRecreateRetries
+					if event.Name == sourcePath && event.Has(fsnotify.Remove) {
 						log.Warnf("Re-creating watcher on %s", sourcePath)
-						time.Sleep(1 * time.Second)
-						err = watcher.Add(sourcePath)
-						if err != nil {
-							log.Errorf("Error re-creating watcher on %s: %v", sourcePath, err)
-							return
+						attempt := 0
+						for {
+							err = watcher.Add(sourcePath)
+							if err != nil {
+								log.Errorf("Error re-creating watcher on %s: %v", sourcePath, err)
+								if attempt < maxRecreateRetries {
+									attempt++
+									log.Infof("Retrying to re-create watcher, attempt %d of %d", attempt, maxRecreateRetries)
+									time.Sleep(1 * time.Second)
+									continue
+								}
+								log.Errorf("Maximum retries exceeded.")
+								close(done)
+								return
+							}
+							break
 						}
 						// Force sync because we probably missed an event
 						forceSync = true
@@ -64,8 +83,8 @@ func StartGPGWatcher(sourcePath string) error {
 
 	err = watcher.Add(sourcePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to add a new source to the watcher: %w", err)
 	}
 	<-done
-	return fmt.Errorf("Abnormal termination of GPG watcher, refusing to continue.")
+	return errors.New("abnormal termination of GPG watcher, refusing to continue")
 }

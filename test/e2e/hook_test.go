@@ -6,15 +6,18 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	v1 "k8s.io/api/core/v1"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/argoproj/gitops-engine/pkg/health"
 	. "github.com/argoproj/gitops-engine/pkg/sync/common"
-	. "github.com/argoproj/gitops-engine/pkg/utils/errors"
 
-	. "github.com/argoproj/argo-cd/pkg/apis/application/v1alpha1"
-	. "github.com/argoproj/argo-cd/test/e2e/fixture"
-	. "github.com/argoproj/argo-cd/test/e2e/fixture/app"
+	. "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	. "github.com/argoproj/argo-cd/v3/test/e2e/fixture"
+	. "github.com/argoproj/argo-cd/v3/test/e2e/fixture/app"
+	"github.com/argoproj/argo-cd/v3/util/lua"
 )
 
 func TestPreSyncHookSuccessful(t *testing.T) {
@@ -33,11 +36,12 @@ func TestPostSyncHookSuccessful(t *testing.T) {
 
 // make sure we can run a standard sync hook
 func testHookSuccessful(t *testing.T, hookType HookType) {
+	t.Helper()
 	Given(t).
 		Path("hook").
 		When().
 		PatchFile("hook.yaml", fmt.Sprintf(`[{"op": "replace", "path": "/metadata/annotations", "value": {"argocd.argoproj.io/hook": "%s"}}]`, hookType)).
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(OperationPhaseIs(OperationSucceeded)).
@@ -48,16 +52,33 @@ func testHookSuccessful(t *testing.T, hookType HookType) {
 		Expect(ResourceResultIs(ResourceResult{Version: "v1", Kind: "Pod", Namespace: DeploymentNamespace(), Name: "hook", Message: "pod/hook created", HookType: hookType, HookPhase: OperationSucceeded, SyncPhase: SyncPhase(hookType)}))
 }
 
-// make sure that that hooks do not appear in "argocd app diff"
+func TestPostDeleteHook(t *testing.T) {
+	Given(t).
+		Path("post-delete-hook").
+		When().
+		CreateApp().
+		Refresh(RefreshTypeNormal).
+		Delete(true).
+		Then().
+		Expect(DoesNotExist()).
+		AndAction(func() {
+			hooks, err := KubeClientset.CoreV1().Pods(DeploymentNamespace()).List(t.Context(), metav1.ListOptions{})
+			require.NoError(t, err)
+			assert.Len(t, hooks.Items, 1)
+			assert.Equal(t, "hook", hooks.Items[0].Name)
+		})
+}
+
+// make sure that hooks do not appear in "argocd app diff"
 func TestHookDiff(t *testing.T) {
 	Given(t).
 		Path("hook").
 		When().
-		Create().
+		CreateApp().
 		Then().
 		And(func(_ *Application) {
 			output, err := RunCli("app", "diff", Name())
-			assert.Error(t, err)
+			require.Error(t, err)
 			assert.Contains(t, output, "name: pod")
 			assert.NotContains(t, output, "name: hook")
 		})
@@ -71,13 +92,13 @@ func TestPreSyncHookFailure(t *testing.T) {
 		PatchFile("hook.yaml", `[{"op": "replace", "path": "/metadata/annotations", "value": {"argocd.argoproj.io/hook": "PreSync"}}]`).
 		// make hook fail
 		PatchFile("hook.yaml", `[{"op": "replace", "path": "/spec/containers/0/command", "value": ["false"]}]`).
-		Create().
+		CreateApp().
 		IgnoreErrors().
 		Sync().
 		Then().
-		Expect(Error("hook  Failed              PreSync", "")).
+		Expect(Error("hook    Failed   Synced     PreSync  container \"main\" failed", "")).
 		// make sure resource are also printed
-		Expect(Error("pod   OutOfSync  Missing", "")).
+		Expect(Error("pod  OutOfSync  Missing", "")).
 		Expect(OperationPhaseIs(OperationFailed)).
 		// if a pre-sync hook fails, we should not start the main sync
 		Expect(SyncStatusIs(SyncStatusCodeOutOfSync)).
@@ -92,7 +113,7 @@ func TestSyncHookFailure(t *testing.T) {
 		When().
 		// make hook fail
 		PatchFile("hook.yaml", `[{"op": "replace", "path": "/spec/containers/0/command/0", "value": "false"}]`).
-		Create().
+		CreateApp().
 		IgnoreErrors().
 		Sync().
 		Then().
@@ -108,7 +129,7 @@ func TestSyncHookResourceFailure(t *testing.T) {
 	Given(t).
 		Path("hook-and-deployment").
 		When().
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(OperationPhaseIs(OperationSucceeded)).
@@ -124,7 +145,7 @@ func TestPostSyncHookFailure(t *testing.T) {
 		PatchFile("hook.yaml", `[{"op": "replace", "path": "/metadata/annotations", "value": {"argocd.argoproj.io/hook": "PostSync"}}]`).
 		// make hook fail
 		PatchFile("hook.yaml", `[{"op": "replace", "path": "/spec/containers/0/command/0", "value": "false"}]`).
-		Create().
+		CreateApp().
 		IgnoreErrors().
 		Sync().
 		Then().
@@ -143,7 +164,7 @@ func TestPostSyncHookPodFailure(t *testing.T) {
 		PatchFile("hook.yaml", `[{"op": "add", "path": "/metadata/annotations", "value": {"argocd.argoproj.io/hook": "PostSync"}}]`).
 		// make pod fail
 		PatchFile("pod.yaml", `[{"op": "replace", "path": "/spec/containers/0/command/0", "value": "false"}]`).
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		// TODO - I feel like this should be a failure, not success
@@ -151,7 +172,7 @@ func TestPostSyncHookPodFailure(t *testing.T) {
 		Expect(ResourceSyncStatusIs("Pod", "pod", SyncStatusCodeSynced)).
 		Expect(ResourceHealthIs("Pod", "pod", health.HealthStatusDegraded)).
 		Expect(ResourceResultNumbering(1)).
-		Expect(NotPod(func(p v1.Pod) bool { return p.Name == "hook" }))
+		Expect(NotPod(func(p corev1.Pod) bool { return p.Name == "hook" }))
 }
 
 func TestSyncFailHookPodFailure(t *testing.T) {
@@ -171,14 +192,14 @@ spec:
   containers:
     - command:
         - "true"
-      image: "alpine:latest"
+      image: "quay.io/argoprojlabs/argocd-e2e-container:0.1"
       imagePullPolicy: IfNotPresent
       name: main
   restartPolicy: Never
 `).
 		PatchFile("hook.yaml", `[{"op": "replace", "path": "/metadata/annotations", "value": {"argocd.argoproj.io/hook": "PostSync"}}]`).
 		PatchFile("hook.yaml", `[{"op": "replace", "path": "/spec/containers/0/command/0", "value": "false"}]`).
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(ResourceResultIs(ResourceResult{Version: "v1", Kind: "Pod", Namespace: DeploymentNamespace(), Name: "sync-fail-hook", Message: "pod/sync-fail-hook created", HookType: HookTypeSyncFail, HookPhase: OperationSucceeded, SyncPhase: SyncPhaseSyncFail})).
@@ -202,7 +223,7 @@ spec:
   containers:
     - command:
         - "true"
-      image: "alpine:latest"
+      image: "quay.io/argoprojlabs/argocd-e2e-container:0.1"
       imagePullPolicy: IfNotPresent
       name: main
   restartPolicy: Never
@@ -218,14 +239,14 @@ spec:
   containers:
     - command:
         - "false"
-      image: "alpine:latest"
+      image: "quay.io/argoprojlabs/argocd-e2e-container:0.1"
       imagePullPolicy: IfNotPresent
       name: main
   restartPolicy: Never
 `).
 		PatchFile("hook.yaml", `[{"op": "replace", "path": "/metadata/annotations", "value": {"argocd.argoproj.io/hook": "PostSync"}}]`).
 		PatchFile("hook.yaml", `[{"op": "replace", "path": "/spec/containers/0/command/0", "value": "false"}]`).
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(ResourceResultIs(ResourceResult{Version: "v1", Kind: "Pod", Namespace: DeploymentNamespace(), Name: "successful-sync-fail-hook", Message: "pod/successful-sync-fail-hook created", HookType: HookTypeSyncFail, HookPhase: OperationSucceeded, SyncPhase: SyncPhaseSyncFail})).
@@ -239,11 +260,11 @@ func TestHookDeletePolicyHookSucceededHookExit0(t *testing.T) {
 		Path("hook").
 		When().
 		PatchFile("hook.yaml", `[{"op": "add", "path": "/metadata/annotations/argocd.argoproj.io~1hook-delete-policy", "value": "HookSucceeded"}]`).
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(OperationPhaseIs(OperationSucceeded)).
-		Expect(NotPod(func(p v1.Pod) bool { return p.Name == "hook" }))
+		Expect(NotPod(func(p corev1.Pod) bool { return p.Name == "hook" }))
 }
 
 // make sure that we delete the hook on failure, if policy is set
@@ -253,13 +274,13 @@ func TestHookDeletePolicyHookSucceededHookExit1(t *testing.T) {
 		When().
 		PatchFile("hook.yaml", `[{"op": "add", "path": "/metadata/annotations/argocd.argoproj.io~1hook-delete-policy", "value": "HookSucceeded"}]`).
 		PatchFile("hook.yaml", `[{"op": "replace", "path": "/spec/containers/0/command/0", "value": "false"}]`).
-		Create().
+		CreateApp().
 		IgnoreErrors().
 		Sync().
 		Then().
 		Expect(OperationPhaseIs(OperationFailed)).
 		Expect(ResourceResultNumbering(2)).
-		Expect(Pod(func(p v1.Pod) bool { return p.Name == "hook" }))
+		Expect(Pod(func(p corev1.Pod) bool { return p.Name == "hook" }))
 }
 
 // make sure that we do NOT delete the hook on success if failure policy is set
@@ -268,12 +289,12 @@ func TestHookDeletePolicyHookFailedHookExit0(t *testing.T) {
 		Path("hook").
 		When().
 		PatchFile("hook.yaml", `[{"op": "add", "path": "/metadata/annotations/argocd.argoproj.io~1hook-delete-policy", "value": "HookFailed"}]`).
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(OperationPhaseIs(OperationSucceeded)).
 		Expect(ResourceResultNumbering(2)).
-		Expect(Pod(func(p v1.Pod) bool { return p.Name == "hook" }))
+		Expect(Pod(func(p corev1.Pod) bool { return p.Name == "hook" }))
 }
 
 // make sure that we do delete the hook on failure if failure policy is set
@@ -284,12 +305,12 @@ func TestHookDeletePolicyHookFailedHookExit1(t *testing.T) {
 		IgnoreErrors().
 		PatchFile("hook.yaml", `[{"op": "add", "path": "/metadata/annotations/argocd.argoproj.io~1hook-delete-policy", "value": "HookFailed"}]`).
 		PatchFile("hook.yaml", `[{"op": "replace", "path": "/spec/containers/0/command/0", "value": "false"}]`).
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(OperationPhaseIs(OperationFailed)).
 		Expect(ResourceResultNumbering(2)).
-		Expect(NotPod(func(p v1.Pod) bool { return p.Name == "hook" }))
+		Expect(NotPod(func(p corev1.Pod) bool { return p.Name == "hook" }))
 }
 
 // make sure that we can run the hook twice
@@ -299,7 +320,7 @@ func TestHookBeforeHookCreation(t *testing.T) {
 		Path("hook").
 		When().
 		PatchFile("hook.yaml", `[{"op": "add", "path": "/metadata/annotations/argocd.argoproj.io~1hook-delete-policy", "value": "BeforeHookCreation"}]`).
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(OperationPhaseIs(OperationSucceeded)).
@@ -307,14 +328,14 @@ func TestHookBeforeHookCreation(t *testing.T) {
 		Expect(HealthIs(health.HealthStatusHealthy)).
 		Expect(ResourceResultNumbering(2)).
 		// the app will be in health+n-sync before this hook has run
-		Expect(Pod(func(p v1.Pod) bool { return p.Name == "hook" })).
+		Expect(Pod(func(p corev1.Pod) bool { return p.Name == "hook" })).
 		And(func(_ *Application) {
 			var err error
 			creationTimestamp1, err = getCreationTimestamp()
-			CheckError(err)
+			require.NoError(t, err)
 			assert.NotEmpty(t, creationTimestamp1)
 			// pause to ensure that timestamp will change
-			time.Sleep(2 * time.Second)
+			time.Sleep(1 * time.Second)
 		}).
 		When().
 		Sync().
@@ -323,10 +344,10 @@ func TestHookBeforeHookCreation(t *testing.T) {
 		Expect(SyncStatusIs(SyncStatusCodeSynced)).
 		Expect(HealthIs(health.HealthStatusHealthy)).
 		Expect(ResourceResultNumbering(2)).
-		Expect(Pod(func(p v1.Pod) bool { return p.Name == "hook" })).
+		Expect(Pod(func(p corev1.Pod) bool { return p.Name == "hook" })).
 		And(func(_ *Application) {
 			creationTimestamp2, err := getCreationTimestamp()
-			CheckError(err)
+			require.NoError(t, err)
 			assert.NotEmpty(t, creationTimestamp2)
 			assert.NotEqual(t, creationTimestamp1, creationTimestamp2)
 		})
@@ -342,7 +363,7 @@ func TestHookBeforeHookCreationFailure(t *testing.T) {
 	{"op": "add", "path": "/metadata/annotations/argocd.argoproj.io~1hook-delete-policy", "value": "BeforeHookCreation"},
 	{"op": "replace", "path": "/spec/containers/0/command", "value": ["sleep", "3"]}
 ]`).
-		Create().
+		CreateApp().
 		IgnoreErrors().
 		Sync().
 		DoNotIgnoreErrors().
@@ -363,12 +384,12 @@ func TestHookSkip(t *testing.T) {
 		When().
 		// should not create this pod
 		PatchFile("pod.yaml", `[{"op": "replace", "path": "/metadata/annotations", "value": {"argocd.argoproj.io/hook": "Skip"}}]`).
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(OperationPhaseIs(OperationSucceeded)).
 		Expect(ResourceResultNumbering(1)).
-		Expect(NotPod(func(p v1.Pod) bool { return p.Name == "pod" }))
+		Expect(NotPod(func(p corev1.Pod) bool { return p.Name == "pod" }))
 }
 
 // make sure that we do NOT name non-hook resources in they are unnamed
@@ -378,7 +399,7 @@ func TestNamingNonHookResource(t *testing.T) {
 		Path("hook").
 		When().
 		PatchFile("pod.yaml", `[{"op": "remove", "path": "/metadata/name"}]`).
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(OperationPhaseIs(OperationFailed))
@@ -393,16 +414,69 @@ func TestAutomaticallyNamingUnnamedHook(t *testing.T) {
 		PatchFile("hook.yaml", `[{"op": "remove", "path": "/metadata/name"}]`).
 		// make this part of two sync tasks
 		PatchFile("hook.yaml", `[{"op": "replace", "path": "/metadata/annotations", "value": {"argocd.argoproj.io/hook": "PreSync,PostSync"}}]`).
-		Create().
+		CreateApp().
 		Sync().
 		Then().
 		Expect(OperationPhaseIs(OperationSucceeded)).
 		Expect(SyncStatusIs(SyncStatusCodeSynced)).
 		And(func(app *Application) {
 			resources := app.Status.OperationState.SyncResult.Resources
-			assert.Equal(t, 3, len(resources))
+			assert.Len(t, resources, 3)
 			// make sure we don't use the same name
 			assert.Contains(t, resources[0].Name, "presync")
 			assert.Contains(t, resources[2].Name, "postsync")
 		})
+}
+
+func TestHookFinalizerPreSync(t *testing.T) {
+	testHookFinalizer(t, HookTypePreSync)
+}
+
+func TestHookFinalizerSync(t *testing.T) {
+	testHookFinalizer(t, HookTypeSync)
+}
+
+func TestHookFinalizerPostSync(t *testing.T) {
+	testHookFinalizer(t, HookTypePostSync)
+}
+
+func testHookFinalizer(t *testing.T, hookType HookType) {
+	t.Helper()
+	Given(t).
+		And(func() {
+			require.NoError(t, SetResourceOverrides(map[string]ResourceOverride{
+				lua.GetConfigMapKey(schema.FromAPIVersionAndKind("batch/v1", "Job")): {
+					HealthLua: `
+						local hs = {}
+						hs.status = "Healthy"
+						if obj.metadata.deletionTimestamp == nil then
+							hs.status = "Progressing"
+							hs.message = "Waiting to be externally deleted"
+							return hs
+						end
+						if obj.metadata.finalizers ~= nil  then
+							for i, finalizer in ipairs(obj.metadata.finalizers) do
+								if finalizer == "argocd.argoproj.io/hook-finalizer" then
+									hs.message = "Resource has finalizer"
+									return hs
+								end
+							end
+						end
+						hs.message = "no finalizer for a hook is wrong"
+						return hs`,
+				},
+			}))
+		}).
+		Path("hook-resource-deleted-externally").
+		When().
+		PatchFile("hook.yaml", fmt.Sprintf(`[{"op": "replace", "path": "/metadata/annotations", "value": {"argocd.argoproj.io/hook": "%s"}}]`, hookType)).
+		CreateApp().
+		Sync().
+		Then().
+		Expect(OperationPhaseIs(OperationSucceeded)).
+		Expect(SyncStatusIs(SyncStatusCodeSynced)).
+		Expect(ResourceSyncStatusIs("Pod", "pod", SyncStatusCodeSynced)).
+		Expect(ResourceHealthIs("Pod", "pod", health.HealthStatusHealthy)).
+		Expect(ResourceResultNumbering(2)).
+		Expect(ResourceResultIs(ResourceResult{Group: "batch", Version: "v1", Kind: "Job", Namespace: DeploymentNamespace(), Name: "hook", Message: "Resource has finalizer", HookType: hookType, HookPhase: OperationSucceeded, SyncPhase: SyncPhase(hookType)}))
 }

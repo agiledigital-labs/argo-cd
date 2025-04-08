@@ -1,33 +1,36 @@
 package commands
 
 import (
-	"context"
 	"fmt"
 	"os"
 
-	"github.com/argoproj/gitops-engine/pkg/utils/errors"
-	argoio "github.com/argoproj/gitops-engine/pkg/utils/io"
-	"github.com/coreos/go-oidc"
+	"github.com/coreos/go-oidc/v3/oidc"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
-	argocdclient "github.com/argoproj/argo-cd/pkg/apiclient"
-	settingspkg "github.com/argoproj/argo-cd/pkg/apiclient/settings"
-	"github.com/argoproj/argo-cd/util/localconfig"
-	"github.com/argoproj/argo-cd/util/session"
+	"github.com/argoproj/argo-cd/v3/cmd/argocd/commands/headless"
+	argocdclient "github.com/argoproj/argo-cd/v3/pkg/apiclient"
+	settingspkg "github.com/argoproj/argo-cd/v3/pkg/apiclient/settings"
+	"github.com/argoproj/argo-cd/v3/util/errors"
+	argoio "github.com/argoproj/argo-cd/v3/util/io"
+	"github.com/argoproj/argo-cd/v3/util/localconfig"
+	"github.com/argoproj/argo-cd/v3/util/session"
 )
 
 // NewReloginCommand returns a new instance of `argocd relogin` command
 func NewReloginCommand(globalClientOpts *argocdclient.ClientOptions) *cobra.Command {
 	var (
-		password string
-		ssoPort  int
+		password         string
+		ssoPort          int
+		ssoLaunchBrowser bool
 	)
-	var command = &cobra.Command{
+	command := &cobra.Command{
 		Use:   "relogin",
 		Short: "Refresh an expired authenticate token",
 		Long:  "Refresh an expired authenticate token",
 		Run: func(c *cobra.Command, args []string) {
+			ctx := c.Context()
+
 			if len(args) != 0 {
 				c.HelpFunc()(c, args)
 				os.Exit(1)
@@ -43,24 +46,26 @@ func NewReloginCommand(globalClientOpts *argocdclient.ClientOptions) *cobra.Comm
 			var tokenString string
 			var refreshToken string
 			clientOpts := argocdclient.ClientOptions{
-				ConfigPath:      "",
-				ServerAddr:      configCtx.Server.Server,
-				Insecure:        configCtx.Server.Insecure,
-				GRPCWeb:         globalClientOpts.GRPCWeb,
-				GRPCWebRootPath: globalClientOpts.GRPCWebRootPath,
-				PlainText:       configCtx.Server.PlainText,
+				ConfigPath:        "",
+				ServerAddr:        configCtx.Server.Server,
+				Insecure:          configCtx.Server.Insecure,
+				ClientCertFile:    globalClientOpts.ClientCertFile,
+				ClientCertKeyFile: globalClientOpts.ClientCertKeyFile,
+				GRPCWeb:           globalClientOpts.GRPCWeb,
+				GRPCWebRootPath:   globalClientOpts.GRPCWebRootPath,
+				PlainText:         configCtx.Server.PlainText,
+				Headers:           globalClientOpts.Headers,
 			}
-			acdClient := argocdclient.NewClientOrDie(&clientOpts)
+			acdClient := headless.NewClientOrDie(&clientOpts, c)
 			claims, err := configCtx.User.Claims()
 			errors.CheckError(err)
 			if claims.Issuer == session.SessionManagerClaimsIssuer {
-				fmt.Printf("Relogging in as '%s'\n", claims.Subject)
-				tokenString = passwordLogin(acdClient, claims.Subject, password)
+				fmt.Printf("Relogging in as '%s'\n", localconfig.GetUsername(claims.Subject))
+				tokenString = passwordLogin(ctx, acdClient, localconfig.GetUsername(claims.Subject), password)
 			} else {
 				fmt.Println("Reinitiating SSO login")
 				setConn, setIf := acdClient.NewSettingsClientOrDie()
 				defer argoio.Close(setConn)
-				ctx := context.Background()
 				httpClient, err := acdClient.HTTPClient()
 				errors.CheckError(err)
 				ctx = oidc.ClientContext(ctx, httpClient)
@@ -68,7 +73,7 @@ func NewReloginCommand(globalClientOpts *argocdclient.ClientOptions) *cobra.Comm
 				errors.CheckError(err)
 				oauth2conf, provider, err := acdClient.OIDCConfig(ctx, acdSet)
 				errors.CheckError(err)
-				tokenString, refreshToken = oauth2Login(ctx, ssoPort, acdSet.GetOIDCConfig(), oauth2conf, provider)
+				tokenString, refreshToken = oauth2Login(ctx, ssoPort, acdSet.GetOIDCConfig(), oauth2conf, provider, ssoLaunchBrowser)
 			}
 
 			localCfg.UpsertUser(localconfig.User{
@@ -80,8 +85,21 @@ func NewReloginCommand(globalClientOpts *argocdclient.ClientOptions) *cobra.Comm
 			errors.CheckError(err)
 			fmt.Printf("Context '%s' updated\n", localCfg.CurrentContext)
 		},
+		Example: `  
+# Reinitiates the login with previous contexts
+argocd relogin
+
+# Reinitiates the login with password
+argocd relogin --password YOUR_PASSWORD
+
+# Configure direct access using Kubernetes API server
+argocd login cd.argoproj.io --core
+
+# If user logged in with - "argocd login cd.argoproj.io" with sso login
+# The command - "argocd relogin" will Reinitiates SSO login and updates the server context`,
 	}
-	command.Flags().StringVar(&password, "password", "", "the password of an account to authenticate")
-	command.Flags().IntVar(&ssoPort, "sso-port", DefaultSSOLocalPort, "port to run local OAuth2 login application")
+	command.Flags().StringVar(&password, "password", "", "The password of an account to authenticate")
+	command.Flags().IntVar(&ssoPort, "sso-port", DefaultSSOLocalPort, "Port to run local OAuth2 login application")
+	command.Flags().BoolVar(&ssoLaunchBrowser, "sso-launch-browser", true, "Automatically launch the default browser when performing SSO login")
 	return command
 }

@@ -6,11 +6,14 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type MetricsServer struct {
 	handler                  http.Handler
+	gitFetchFailCounter      *prometheus.CounterVec
+	gitLsRemoteFailCounter   *prometheus.CounterVec
 	gitRequestCounter        *prometheus.CounterVec
 	gitRequestHistogram      *prometheus.HistogramVec
 	repoPendingRequestsGauge *prometheus.GaugeVec
@@ -28,8 +31,26 @@ const (
 // NewMetricsServer returns a new prometheus server which collects application metrics.
 func NewMetricsServer() *MetricsServer {
 	registry := prometheus.NewRegistry()
-	registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
-	registry.MustRegister(prometheus.NewGoCollector())
+	registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	registry.MustRegister(collectors.NewGoCollector())
+
+	gitFetchFailCounter := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "argocd_git_fetch_fail_total",
+			Help: "Number of git fetch requests failures by repo server",
+		},
+		[]string{"repo", "revision"},
+	)
+	registry.MustRegister(gitFetchFailCounter)
+
+	gitLsRemoteFailCounter := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "argocd_git_lsremote_fail_total",
+			Help: "Number of git ls-remote requests failures by repo server",
+		},
+		[]string{"repo", "revision"},
+	)
+	registry.MustRegister(gitLsRemoteFailCounter)
 
 	gitRequestCounter := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -80,6 +101,8 @@ func NewMetricsServer() *MetricsServer {
 
 	return &MetricsServer{
 		handler:                  promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
+		gitFetchFailCounter:      gitFetchFailCounter,
+		gitLsRemoteFailCounter:   gitLsRemoteFailCounter,
 		gitRequestCounter:        gitRequestCounter,
 		gitRequestHistogram:      gitRequestHistogram,
 		repoPendingRequestsGauge: repoPendingRequestsGauge,
@@ -90,6 +113,14 @@ func NewMetricsServer() *MetricsServer {
 
 func (m *MetricsServer) GetHandler() http.Handler {
 	return m.handler
+}
+
+func (m *MetricsServer) IncGitFetchFail(repo string, revision string) {
+	m.gitFetchFailCounter.WithLabelValues(repo, revision).Inc()
+}
+
+func (m *MetricsServer) IncGitLsRemoteFail(repo string, revision string) {
+	m.gitLsRemoteFailCounter.WithLabelValues(repo, revision).Inc()
 }
 
 // IncGitRequest increments the git requests counter
